@@ -313,6 +313,26 @@ fn unix_socket_shape() -> f64 {
     elapsed.as_secs_f64() / ROUND_TRIPS as f64 * 1e6
 }
 
+/// What zeroing a read buffer costs, per read.
+///
+/// `std::io::Read::read` takes `&mut [u8]`, which means initialised memory,
+/// so filling a growable buffer from a socket means writing zeros over the
+/// spare capacity first. The kernel is about to overwrite it. This measures
+/// the write that exists only to satisfy the signature.
+fn buffer_zeroing(size: usize) -> f64 {
+    const REPEATS: usize = 20_000;
+    let mut buffer = vec![0u8; size];
+    let start = Instant::now();
+    for _ in 0..REPEATS {
+        // Same shape as the read path: zero the region, then pretend to read.
+        for byte in buffer.iter_mut() {
+            *byte = 0;
+        }
+        std::hint::black_box(&buffer);
+    }
+    start.elapsed().as_secs_f64() / REPEATS as f64 * 1e6
+}
+
 fn main() {
     // Warm every path.
     let _ = raw_libc_syscalls();
@@ -363,4 +383,11 @@ fn main() {
         "  a syscall is {:.4}us, so the {raw:.2}us is not syscall count:\n           it is the kernel scheduling two threads through a socket.\n",
         syscall
     );
+
+    println!("  cost of zeroing a read buffer, which std::io::Read's");
+    println!("  signature requires before every read:");
+    for size in [4096usize, 16 * 1024, 64 * 1024] {
+        println!("    {size:>6} bytes  {:>8.3} us", buffer_zeroing(size));
+    }
+    println!();
 }

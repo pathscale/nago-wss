@@ -10,12 +10,34 @@
 //! what the reactor adds. Set the descriptor non-blocking, register it, and the
 //! standard type becomes an async one.
 //!
+//! # Where `std::net`'s interface stops being enough
+//!
+//! The descriptors come from `std`, but two of its interfaces do not survive
+//! contact with a reactor and are bypassed here.
+//!
+//! `std::io::Read::read` takes `&mut [u8]`, which is initialised memory. The
+//! kernel is about to overwrite that memory, so zeroing it first is pure
+//! waste, and it is not free: 0.15us per read on a 16 KiB buffer, on every
+//! message. [`TcpStream::poll_read_buf`] calls `recv` directly into the
+//! uninitialised tail instead.
+//!
+//! `WouldBlock` as an `io::Error` is the other one. "Not ready" is the normal
+//! state of a reactive socket rather than a failure, and routing it through
+//! error construction and a `kind()` comparison is the wrong shape for the
+//! signal the whole design turns on. That one is absorbed here rather than
+//! fixed, since the syscall reports it through `errno` regardless.
+//!
 //! # The edge triggered contract
 //!
 //! Every read and write loops until the kernel says `EWOULDBLOCK`, and only
 //! then parks a waker. Registering interest without first draining would wait
 //! for an edge that has already passed, and the task would hang with data
 //! sitting in the socket buffer.
+
+// This module owns the descriptor level calls that `std::io`'s traits cannot
+// express, so the crate wide deny is lifted here. Every block names what it
+// relies on.
+#![allow(unsafe_code)]
 
 use std::io::{self, Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener as StdListener, TcpStream as StdStream};
@@ -85,31 +107,46 @@ impl TcpStream {
         if spare.is_empty() {
             return Poll::Ready(Ok(0));
         }
-
-        // Reading into uninitialised memory needs `unsafe` to name the bytes,
-        // and this module is unsafe-free by policy. `BytesMut` hands out
-        // `MaybeUninit`, so the tail is zeroed once before the read: that is a
-        // write of the spare capacity rather than of every byte received, it
-        // happens only as the buffer grows, and it keeps the read path free of
-        // an initialisation invariant that a later edit could quietly break.
-        for slot in spare.iter_mut() {
-            slot.write(0);
-        }
+        let spare_len = spare.len();
+        let spare_ptr = spare.as_mut_ptr();
         let filled = buffer.len();
-        let capacity = buffer.capacity();
-        // SAFETY-FREE: the loop above initialised every spare byte, so the
-        // whole capacity is now valid to expose as a slice.
-        buffer.resize(capacity, 0);
 
-        let result = self.poll_read(cx, &mut buffer[filled..]);
-        match result {
-            Poll::Ready(Ok(read)) => {
-                buffer.truncate(filled + read);
-                Poll::Ready(Ok(read))
+        loop {
+            // `recv` into the uninitialised tail. This is the call
+            // `std::io::Read` cannot express: its signature demands an
+            // initialised slice, so going through it means zeroing memory the
+            // kernel is about to overwrite.
+            //
+            // SAFETY: `spare_ptr` points at `spare_len` bytes of allocated
+            // capacity owned by `buffer`, which outlives this call, and `recv`
+            // only ever writes within the length it is given. `buffer` is not
+            // aliased here: the spare region is beyond its length, so no live
+            // reference into the initialised part overlaps it.
+            let read = unsafe {
+                libc::recv(
+                    self.inner.as_raw_fd(),
+                    spare_ptr.cast::<libc::c_void>(),
+                    spare_len,
+                    0,
+                )
+            };
+
+            if read >= 0 {
+                let read = read as usize;
+                // SAFETY: `recv` reported writing `read` bytes into the spare
+                // capacity, so that many bytes past `filled` are initialised.
+                unsafe { buffer.set_len(filled + read) };
+                return Poll::Ready(Ok(read));
             }
-            other => {
-                buffer.truncate(filled);
-                other
+
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                io::ErrorKind::WouldBlock => {
+                    self.registration.poll_readable(cx.waker());
+                    return Poll::Pending;
+                }
+                io::ErrorKind::Interrupted => continue,
+                _ => return Poll::Ready(Err(error)),
             }
         }
     }
