@@ -53,3 +53,7 @@ pub mod conn;
 /// Performing the opening handshake over a socket.
 #[cfg(feature = "reactor")]
 pub mod upgrade;
+
+/// TLS, for `wss://`.
+#[cfg(feature = "tls")]
+pub mod tls;

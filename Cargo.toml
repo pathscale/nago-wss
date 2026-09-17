@@ -11,11 +11,14 @@ categories = ["network-programming", "web-programming::websocket", "no-std"]
 
 [features]
 # The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
-default = ["std", "reactor"]
+default = ["std", "reactor", "tls"]
 std = []
 # The readiness reactor: kqueue/epoll, sockets, and the futures over them.
 # Needs `std` for `io::Error` and owned descriptors.
 reactor = ["std", "dep:libc", "dep:nagoya"]
+# wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
+# rather than a second I/O stack.
+tls = ["reactor", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 
 [dependencies]
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
@@ -26,11 +29,21 @@ bytes = { version = "1.7", default-features = false }
 # that links no Rust std of its own; the ban is on std, and the platform already
 # provides libc. Same version the house uses in ekostd.
 libc = { version = "^0.2.189", default-features = false, optional = true }
+# TLS. rustls is already sans-io: read_tls, write_tls and process_new_packets
+# take byte buffers and know nothing about a runtime, which is the same shape
+# this crate's protocol core has. So there is no fork to maintain and no
+# tokio-rustls in the graph, only the small amount of glue in `tls`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }
+
 # The scheduler, sync and time this crate does not implement. Nagoya ships no
 # I/O driver on purpose, which is why the reactor below is ours and not its.
 nagoya = { path = "../nagoya", optional = true }
 
 [dev-dependencies]
+# Test certificates, generated in process. Same version endpoint-libs uses.
+rcgen = "0.14"
 # The comparison arm, and the only reason these are here. Same version
 # endpoint-libs pins, so the number reflects what the fleet actually runs.
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake"] }
