@@ -61,7 +61,7 @@ nago-rustls = { version = "0.1.1", path = "../nago-rustls", optional = true }
 # there, because generational tokens and edge triggered registration are the
 # same problem for anything that wants a socket, and none of it was about
 # WebSockets.
-nagoya = { version = "0.1.4", path = "../nagoya", features = ["reactor"], optional = true }
+nagoya = { version = "0.1.5", path = "../nagoya", features = ["reactor"], optional = true }
 # Name resolution only. `getaddrinfo` is the one syscall this crate still binds
 # itself, because nagoya has no resolver to take it. Everything else that
 # called the kernel left with the reactor.
@@ -72,7 +72,7 @@ libc = { version = "^0.2.189", default-features = false, optional = true }
 # rather than a plain one because this crate is generic over its transport: a
 # consumer supplies the socket, so only the things here that need a running
 # one name it.
-nagoya = { version = "0.1.4", path = "../nagoya", features = ["reactor"] }
+nagoya = { version = "0.1.5", path = "../nagoya", features = ["reactor"] }
 # Test certificates, generated in process. Same version endpoint-libs uses.
 rcgen = "0.14"
 # The comparison arm, and the only reason these are here. Same version
