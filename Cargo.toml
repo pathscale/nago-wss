@@ -33,7 +33,14 @@ webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 # this crate does not: it is the standard library's validator with vector
 # instructions, and on this machine it is between four and thirteen times
 # faster on the text frames that have to be checked.
-simdutf8 = { version = "0.1", optional = true }
+# `std` off and nothing else off. Its default features are `std` alone, and the
+# vector paths are not behind a feature at all: they are runtime detected on
+# x86 and unconditional on aarch64. Turning defaults off wholesale is the
+# mistake that looks identical to this and is not, because on some crates it
+# takes the SIMD with it. Checked here: `cargo tree -f "{p} {f}"` shows this
+# resolving to no features rather than `default,std`, and the benchmark shows
+# the vector path still running.
+simdutf8 = { version = "0.1", default-features = false, optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
