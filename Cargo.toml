@@ -107,6 +107,13 @@ name = "micro"
 harness = false
 required-features = ["simd-utf8"]
 
+# The echo server the Autobahn suite runs against. Needs the reactor, and says
+# so: without the guard, `cargo build --no-default-features` tries to build it
+# and fails on imports the feature is what provides.
+[[example]]
+name = "autobahn_server"
+required-features = ["reactor"]
+
 # A diagnostic rather than a benchmark: it attributes the floor to its layers.
 [[example]]
 name = "floor_probe"

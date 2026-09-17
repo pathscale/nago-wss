@@ -290,10 +290,19 @@ pub async fn connect_secure(
     let addrs = resolve(&url.host, url.port)?;
     let stream = connect_any(&addrs, handle).await?;
 
+    // The default only exists when the trust anchors are bundled. Without
+    // `webpki-roots` there is nothing to fall back to, so a caller that did
+    // not supply a configuration is asking for a connection that cannot
+    // validate anything, and is told so rather than silently trusting.
+    #[cfg(feature = "webpki-roots")]
     let config = options
         .tls
         .clone()
         .unwrap_or_else(crate::tls::default_client_config);
+    #[cfg(not(feature = "webpki-roots"))]
+    let config = options.tls.clone().ok_or(Error::Url(
+        "wss:// needs a TLS configuration: this build has no bundled roots",
+    ))?;
     // SNI and certificate validation both key off this name, so it is the
     // host from the URL rather than the address that was connected to.
     let name = ServerName::try_from(url.host.clone())
