@@ -5,9 +5,11 @@
 //! `sync` and `time`; what follows is the part it declines to own.
 
 pub mod driver;
+pub mod net;
 #[cfg(test)]
 mod testing;
 pub mod poller;
 
 pub use driver::{Handle, Reactor, Registration};
+pub use net::{TcpListener, TcpStream};
 pub use poller::{Event, Interest, Poller};
