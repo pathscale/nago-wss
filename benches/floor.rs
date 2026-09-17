@@ -31,14 +31,40 @@
 //! * **The reactor's own work.** One `kevent` with an event already pending
 //!   is 0.34us, a mutex pair 0.009us, a clock read 0.024us. The whole of it
 //!   is under a microsecond per trip.
-//! * **The thread handoff.** `Reactor::local` polls on the thread that
-//!   returned from the kernel, which should have removed it, and measured the
-//!   same as the threaded reactor: the batching already amortises it.
 //! * **Copies.** The read path is copy-free from the socket to the message.
 //!
-//! What is left is unexplained. It is also the shape this crate is worst at
-//! and a fleet is least likely to run: ten thousand connections is the case
-//! that matters and this crate leads it comfortably.
+//! # The thread handoff, which was wrongly eliminated
+//!
+//! This list used to say `Reactor::local` "measured the same as the threaded
+//! reactor". It does not, and the measurement that said so was taken on a
+//! machine under a load average of 150, which flattened every arm together.
+//! Re-measured idle, `local` is consistently 2.4 to 2.9us faster than the
+//! threaded reactor, and `examples/floor_probe.rs` puts a park/unpark round
+//! trip between two threads at 3.6us: paid once per message by a reactor that
+//! polls somewhere other than where the kernel returned.
+//!
+//! So the handoff is most of the threaded arm's gap, and using `local` is the
+//! answer to it rather than a tuning exercise.
+//!
+//! # What remains, and why it is not a fixed cost
+//!
+//! Against a tokio arm given the same two thread shape, `local` is bimodal.
+//! Eight consecutive paired runs on an idle machine:
+//!
+//! ```text
+//!   local  22.07 21.62 21.44 21.99 21.54 21.61 21.62 18.33
+//!   tokio  18.39 18.18 18.02 18.25 18.38 18.20 18.35 18.23
+//! ```
+//!
+//! Seven runs sit 3.4us behind. The eighth is level, from the same binary on
+//! the same machine. A fixed cost in the code path cannot do that, so what is
+//! left is a scheduling interaction that this arrangement usually loses and
+//! occasionally does not, most likely which core the two threads land on.
+//!
+//! Chasing it further means pinning threads and reading the scheduler, which
+//! is a different kind of work from anything above. It is also the shape this
+//! crate is worst at and a fleet is least likely to run: ten thousand
+//! connections is the case that matters and this crate leads it comfortably.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -153,6 +179,66 @@ fn nago_floor() -> Duration {
 }
 
 /// The same, on tokio.
+/// tokio with the two ends on separate threads, which is the shape the nago
+/// arms are measured in.
+///
+/// `tokio_floor` puts both ends on one current thread runtime, so a round trip
+/// never crosses a thread. Both nago arms give the peer its own thread, so
+/// every trip crosses one twice. Comparing those two directly charges this
+/// crate for a thread boundary tokio was never asked to pay, which is most of
+/// what the gap looked like.
+fn tokio_floor_two_threads() -> Duration {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let listener = runtime
+        .block_on(async { tokio::net::TcpListener::bind(local()).await })
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            ready_tx.send(()).expect("signal");
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            stream.set_nodelay(true).ok();
+            let mut byte = [0u8; 1];
+            for _ in 0..ROUND_TRIPS {
+                let read = stream.read(&mut byte).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                stream.write_all(&byte).await.expect("write");
+            }
+        });
+    });
+
+    ready_rx.recv().expect("server ready");
+    let elapsed = runtime.block_on(async {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stream.set_nodelay(true).ok();
+        let mut byte = [0u8; 1];
+        let start = Instant::now();
+        for _ in 0..ROUND_TRIPS {
+            stream.write_all(b"x").await.expect("write");
+            let read = stream.read(&mut byte).await.expect("read");
+            assert_eq!(read, 1, "peer closed mid benchmark");
+        }
+        start.elapsed()
+    });
+
+    server.join().expect("server thread");
+    elapsed
+}
+
 fn tokio_floor() -> Duration {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -204,12 +290,15 @@ fn main() {
     let nago = best((0..SAMPLES).map(|_| nago_floor()).collect());
     let nago_local = best((0..SAMPLES).map(|_| nago_local_floor()).collect());
     let tokio = best((0..SAMPLES).map(|_| tokio_floor()).collect());
+    let _ = tokio_floor_two_threads();
+    let tokio_two = best((0..SAMPLES).map(|_| tokio_floor_two_threads()).collect());
 
     let each = |d: Duration| d.as_secs_f64() / ROUND_TRIPS as f64 * 1e6;
     println!("\ntransport floor, 1 byte round trip (best of {SAMPLES})\n");
     println!("  nago-wss threaded  {:>8.2} us/op", each(nago));
     println!("  nago-wss local     {:>8.2} us/op", each(nago_local));
-    println!("  tokio              {:>8.2} us/op", each(tokio));
+    println!("  tokio one thread   {:>8.2} us/op", each(tokio));
+    println!("  tokio two threads  {:>8.2} us/op", each(tokio_two));
     // What the framing costs is deliberately not computed here.
     //
     // It used to be, by subtracting these numbers from two constants copied

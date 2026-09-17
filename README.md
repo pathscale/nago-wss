@@ -140,13 +140,22 @@ A single connection doing one round trip at a time on loopback: 20.2us against
 tokio-tungstenite's 17.0 and sockudo-ws's 15.3. Streaming small payloads is
 worse, 1.54us against tokio's 0.59 at 64 bytes.
 
-Most of that is neither crate's. The transport floor with no WebSocket in it at
-all is 23.99us threaded and 21.88us on the single thread arrangement, against
-tokio's 18.73, and a unix socketpair does the same handoff in 4.9us against
-loopback TCP's 12.1. The remaining difference is real, about three microseconds,
-and is not yet explained: syscall count, kevent cost, the mutex pair, the clock
-read, the thread handoff and copying have each been measured and eliminated.
-`benches/floor.rs` records what has been ruled out so it is not retested.
+Most of that is neither crate's, and most of the rest is one thing: a reactor
+that polls on a different thread from the one the kernel returned to pays a
+park and an unpark per message, measured at 3.6us. `Reactor::local` does not,
+and is 2.4 to 2.9us faster than the threaded reactor as a result. Use it for a
+connection driven by one thread, which is the shape a WebSocket server usually
+wants anyway.
+
+What is left after that is not a fixed cost. Against a tokio arm given the same
+two thread shape, eight consecutive paired runs on an idle machine put this
+crate 3.4us behind seven times and exactly level once, from the same binary.
+That is a scheduling interaction rather than slow code, and chasing it means
+pinning threads and reading the scheduler. `benches/floor.rs` has the numbers
+and the list of what has already been measured and ruled out.
+
+Worth noting where this crate is not behind: waking a task and repolling it,
+with no I/O at all, is 0.0018us here against tokio's 0.0714.
 
 Run them with `cargo bench --features simd-utf8`, or one at a time with
 `--bench micro`, `--bench echo`, `--bench concurrent`, `--bench scale`,
