@@ -594,9 +594,9 @@ dependencies = [
 
 [[package]]
 name = "ps-simdutf8"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfd10dfabfa6220508b049c8e57b47d21e1a085ba42b764786262551bfd8652"
+checksum = "4728371618f944f51f8ad94cd42963dd9a2b78a23689a1819b47ac0e3b060dda"
 dependencies = [
  "cpufeatures 0.3.1",
  "flexpect",

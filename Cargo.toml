@@ -12,7 +12,7 @@ categories = ["network-programming", "web-programming::websocket", "no-std"]
 [features]
 # The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
 default = ["std", "reactor", "tls", "webpki-roots", "simd-utf8"]
-std = []
+std = ["simdutf8?/std"]
 # The readiness reactor: kqueue/epoll, sockets, and the futures over them.
 # Needs `std` for `io::Error` and owned descriptors.
 reactor = ["std", "dep:nagoya", "dep:libc"]
@@ -42,23 +42,19 @@ webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 # 57.37 GB/s against 115.84 on ASCII and 2.56 GB/s against 13.49 on mixed
 # text, which is why it is on by default.
 #
-# `default-features = false` turns off `std` and nothing else, and it is load
-# bearing: `simdutf8` is `#![cfg_attr(not(feature = "std"), no_std)]`, and
-# `simd-utf8` here does not require `std` either, so a `no_std` consumer can
-# have the vector paths. Taking the defaults would hand that consumer `std`
-# through the back door and break the thing this crate is for.
+# `ps-simdutf8` is upstream with one change: the x86 dispatch asks `cpuid`
+# through `cpufeatures` rather than `std::is_x86_feature_detected!`, which was
+# the only reason the crate wanted `std` on x86. Its `std` feature is now one
+# `impl std::error::Error` and gates nothing else, so it defaults to empty and
+# this line needs no `default-features = false`. That matters: on upstream the
+# line was mandatory to stay `no_std`, and it reads exactly like the mistake of
+# switching the SIMD off by accident.
 #
-# It does not cost the SIMD, and on this fork that is true on x86 too.
-# Upstream reaches for `std::is_x86_feature_detected!`, so a `no_std` build
-# there gets whatever `target_feature` was set at compile time, which is
-# usually scalar. `ps-simdutf8` asks `cpuid` through `cpufeatures` instead, so
-# the fastest implementation is still chosen at run time with no operating
-# system involved. On aarch64 both are the same: NEON is baseline and the
-# module is `#[cfg(target_arch = "aarch64")]` with no feature gate.
-#
-# The package is renamed and the library is not, so `use simdutf8::...` and
-# the `simdutf8::basic::from_utf8` call in `proto::message` are unchanged.
-simdutf8 = { package = "ps-simdutf8", version = "0.1.5", default-features = false, optional = true }
+# `std` above forwards to it with `simdutf8?/std`, so a hosted build gets the
+# `Error` impl and a `no_std` one does not, while both get the vector paths.
+# The package is renamed and the library is not, so `use simdutf8::...` and the
+# call in `proto::message` are unchanged.
+simdutf8 = { package = "ps-simdutf8", version = "0.1.6", optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
