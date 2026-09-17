@@ -33,7 +33,7 @@ use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
 
 /// Connection counts to try, in order. The run stops at the first count an
 /// arm cannot reach, which is itself the answer.
-const COUNTS: [usize; 2] = [1_000, 10_000];
+const COUNTS: [usize; 1] = [10_000];
 /// Payload for the broadcast round.
 const PAYLOAD: usize = 64;
 
@@ -68,6 +68,9 @@ fn resident_bytes() -> u64 {
         };
         let mut count = (core::mem::size_of::<TaskBasicInfo>() / core::mem::size_of::<i32>()) as u32;
         // SAFETY: the struct and count match what TASK_BASIC_INFO_64 writes.
+        // `mach_task_self` is deprecated in favour of the `mach2` crate, which
+        // is a dependency this benchmark does not need for one call that works.
+        #[allow(deprecated)]
         let result = unsafe {
             libc::task_info(
                 libc::mach_task_self(),
@@ -283,6 +286,142 @@ mod tokio_arm {
     }
 }
 
+// --- sockudo-ws -----------------------------------------------------------
+
+mod sockudo_arm {
+    use super::{resident_bytes, Outcome, PAYLOAD};
+    use bytes::BytesMut;
+    use futures_util::{SinkExt, StreamExt};
+    use sockudo_ws::handshake::{build_response, generate_accept_key, parse_request};
+    use sockudo_ws::protocol::Message as SMessage;
+    use sockudo_ws::{Config, WebSocketStream};
+    use std::net::SocketAddr;
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// This crate leaves the handshake to the caller, both directions.
+    async fn server_handshake(stream: &mut TcpStream) -> bool {
+        let mut buffer = BytesMut::with_capacity(1024);
+        loop {
+            let Ok(read) = stream.read_buf(&mut buffer).await else {
+                return false;
+            };
+            if read == 0 {
+                return false;
+            }
+            match parse_request(&buffer) {
+                Ok(Some((request, _))) => {
+                    let accept = generate_accept_key(request.key);
+                    let response = build_response(&accept, None, None);
+                    if stream.write_all(&response).await.is_err() {
+                        return false;
+                    }
+                    return stream.flush().await.is_ok();
+                }
+                Ok(None) => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    async fn client_handshake(stream: &mut TcpStream, addr: SocketAddr) -> bool {
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        if stream.write_all(request.as_bytes()).await.is_err() {
+            return false;
+        }
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte).await {
+                Ok(0) | Err(_) => return false,
+                Ok(_) => seen.push(byte[0]),
+            }
+        }
+        true
+    }
+
+    pub fn round(count: usize) -> Option<Outcome> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+
+        runtime.block_on(async move {
+            let listener =
+                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .ok()?;
+            let addr = listener.local_addr().ok()?;
+            let baseline = resident_bytes();
+
+            let server = tokio::spawn(async move {
+                let mut tasks = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    tasks.push(tokio::spawn(async move {
+                        if !server_handshake(&mut stream).await {
+                            return;
+                        }
+                        let mut ws = WebSocketStream::server(stream, Config::default());
+                        if let Some(Ok(message)) = ws.next().await {
+                            let _ = ws.send(message).await;
+                        }
+                    }));
+                }
+                for task in tasks {
+                    let _ = task.await;
+                }
+            });
+
+            let establish_start = Instant::now();
+            let mut conns = Vec::with_capacity(count);
+            for _ in 0..count {
+                let Ok(mut stream) = TcpStream::connect(addr).await else {
+                    break;
+                };
+                stream.set_nodelay(true).ok();
+                if !client_handshake(&mut stream, addr).await {
+                    break;
+                }
+                conns.push(WebSocketStream::client(stream, Config::default()));
+            }
+            let establish = establish_start.elapsed();
+            if conns.len() < count {
+                return None;
+            }
+
+            let bytes_per_connection =
+                resident_bytes().saturating_sub(baseline) / count as u64;
+
+            let payload = bytes::Bytes::from(vec![0x5Au8; PAYLOAD]);
+            let broadcast_start = Instant::now();
+            for ws in conns.iter_mut() {
+                let _ = ws.send(SMessage::Binary(payload.clone())).await;
+            }
+            for ws in conns.iter_mut() {
+                let _ = ws.next().await;
+            }
+            let broadcast = broadcast_start.elapsed();
+
+            drop(conns);
+            let _ = server.await;
+
+            Some(Outcome {
+                establish,
+                broadcast,
+                bytes_per_connection,
+            })
+        })
+    }
+}
+
 // --- reporting ------------------------------------------------------------
 
 fn report(name: &str, count: usize, outcome: Option<Outcome>) {
@@ -306,6 +445,7 @@ fn main() {
         println!("{count} connections:");
         report("nago-wss", count, nago_round(count));
         report("tokio-tungstenite", count, tokio_arm::round(count));
+        report("sockudo-ws", count, sockudo_arm::round(count));
         println!();
     }
 }
