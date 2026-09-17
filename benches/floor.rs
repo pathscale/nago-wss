@@ -12,14 +12,22 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use nago_wss::reactor::socket::Addr;
 use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
 
 const ROUND_TRIPS: usize = 500;
 const SAMPLES: usize = 3;
 
+/// Loopback, port chosen by the kernel. For the tokio and sockudo arms.
 fn local() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
+
+/// The same, in this crate's own address type.
+fn local_addr() -> Addr {
+    Addr::localhost(0)
+}
+
 
 fn best(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
@@ -30,7 +38,7 @@ fn best(mut values: Vec<Duration>) -> Duration {
 fn nago_floor() -> Duration {
     let reactor = Reactor::start().expect("reactor");
     let handle = reactor.handle();
-    let listener = TcpListener::bind(local(), &handle).expect("bind");
+    let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
     let addr = listener.local_addr().expect("addr");
 
     let server = std::thread::spawn(move || {
@@ -48,7 +56,7 @@ fn nago_floor() -> Duration {
     });
 
     let elapsed = nagoya::block_on(async {
-        let mut stream = TcpStream::connect(addr, &handle).expect("connect");
+        let mut stream = TcpStream::connect(addr, &handle).await.expect("connect");
         let mut byte = [0u8; 1];
         let start = Instant::now();
         for _ in 0..ROUND_TRIPS {

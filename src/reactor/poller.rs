@@ -28,7 +28,7 @@
 // relying on.
 #![allow(unsafe_code)]
 
-use std::io;
+use super::error::{Errno, Result};
 
 /// What a caller is waiting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +74,7 @@ pub struct Poller(sys::Poller);
 
 impl Poller {
     /// Create a poller.
-    pub fn new() -> io::Result<Self> {
+    pub fn new() -> Result<Self> {
         sys::Poller::new().map(Self)
     }
 
@@ -86,12 +86,12 @@ impl Poller {
     /// stale event for a closed descriptor therefore resolves to a token that
     /// is simply absent from the caller's table, rather than to a dangling
     /// reference.
-    pub fn add(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+    pub fn add(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
         self.0.add(fd, token, interest)
     }
 
     /// Change what `fd` is being watched for.
-    pub fn modify(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+    pub fn modify(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
         self.0.modify(fd, token, interest)
     }
 
@@ -99,7 +99,7 @@ impl Poller {
     ///
     /// Closing a descriptor also removes it from the kernel's set, so this is
     /// only needed when the descriptor outlives its registration.
-    pub fn remove(&self, fd: i32) -> io::Result<()> {
+    pub fn remove(&self, fd: i32) -> Result<()> {
         self.0.remove(fd)
     }
 
@@ -108,7 +108,7 @@ impl Poller {
     /// `timeout_ns` of `None` blocks indefinitely. A return of zero events is
     /// normal: it means the timeout expired, or the wait was interrupted by a
     /// signal, or the poller was woken by [`Self::wake`].
-    pub fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> io::Result<()> {
+    pub fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> Result<()> {
         self.0.wait(out, timeout_ns)
     }
 
@@ -117,15 +117,15 @@ impl Poller {
     /// This is what lets a newly registered timer or a freshly spawned
     /// connection interrupt a wait that was about to sleep for a long time.
     /// Safe to call from any thread.
-    pub fn wake(&self) -> io::Result<()> {
+    pub fn wake(&self) -> Result<()> {
         self.0.wake()
     }
 }
 
-/// The last OS error, as an `io::Result`, when `value` signals failure.
-fn check(value: i32) -> io::Result<i32> {
+/// The last OS error when `value` signals failure.
+fn check(value: i32) -> Result<i32> {
     if value < 0 {
-        Err(io::Error::last_os_error())
+        Err(Errno::last())
     } else {
         Ok(value)
     }
@@ -142,8 +142,8 @@ fn check(value: i32) -> io::Result<i32> {
     target_os = "dragonfly"
 ))]
 mod sys {
+    use super::super::error::{Errno, Result};
     use super::{check, Event, Interest};
-    use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     /// The identifier used for the user event that implements `wake`.
@@ -155,7 +155,7 @@ mod sys {
     }
 
     impl Poller {
-        pub(super) fn new() -> io::Result<Self> {
+        pub(super) fn new() -> Result<Self> {
             // SAFETY: kqueue takes no arguments and returns a descriptor or -1.
             let raw = check(unsafe { libc::kqueue() })?;
             // SAFETY: `raw` is a fresh descriptor this call owns exclusively.
@@ -179,7 +179,7 @@ mod sys {
         }
 
         /// Submit changes, requesting no events back.
-        fn apply(&self, changes: &[libc::kevent]) -> io::Result<()> {
+        fn apply(&self, changes: &[libc::kevent]) -> Result<()> {
             // SAFETY: `changes` is a valid slice for its length, and a null
             // event list with a zero count asks for no events in return.
             check(unsafe {
@@ -217,18 +217,18 @@ mod sys {
             ]
         }
 
-        pub(super) fn add(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+        pub(super) fn add(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
             self.modify(fd, token, interest)
         }
 
-        pub(super) fn modify(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+        pub(super) fn modify(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
             // Deleting a filter that was never added returns ENOENT, which is
             // the expected outcome when narrowing an interest that only ever
             // had one direction, not a failure.
             for change in Self::changes(fd, token, interest) {
                 if let Err(error) = self.apply(&[change]) {
-                    let ignorable = change.flags & libc::EV_DELETE != 0
-                        && error.raw_os_error() == Some(libc::ENOENT);
+                    let ignorable =
+                        change.flags & libc::EV_DELETE != 0 && error.0 == libc::ENOENT;
                     if !ignorable {
                         return Err(error);
                     }
@@ -237,7 +237,7 @@ mod sys {
             Ok(())
         }
 
-        pub(super) fn remove(&self, fd: i32) -> io::Result<()> {
+        pub(super) fn remove(&self, fd: i32) -> Result<()> {
             self.modify(
                 fd,
                 0,
@@ -248,7 +248,7 @@ mod sys {
             )
         }
 
-        pub(super) fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> io::Result<()> {
+        pub(super) fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> Result<()> {
             /// How many events one syscall may return. A full buffer simply
             /// means the next wait returns immediately with the rest.
             const CAPACITY: usize = 1024;
@@ -279,10 +279,10 @@ mod sys {
                 )
             };
             if count < 0 {
-                let error = io::Error::last_os_error();
+                let error = Errno::last();
                 // A signal during the wait is not a failure: the caller's loop
                 // simply goes around again.
-                if error.kind() == io::ErrorKind::Interrupted {
+                if error.interrupted() {
                     return Ok(());
                 }
                 return Err(error);
@@ -308,7 +308,7 @@ mod sys {
             Ok(())
         }
 
-        pub(super) fn wake(&self) -> io::Result<()> {
+        pub(super) fn wake(&self) -> Result<()> {
             let change = libc::kevent {
                 ident: WAKE_IDENT,
                 filter: libc::EVFILT_USER,
@@ -326,8 +326,8 @@ mod sys {
 
 #[cfg(target_os = "linux")]
 mod sys {
+    use super::super::error::{Errno, Result};
     use super::{check, Event, Interest};
-    use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     /// Token reserved for the eventfd that implements `wake`.
@@ -341,7 +341,7 @@ mod sys {
     }
 
     impl Poller {
-        pub(super) fn new() -> io::Result<Self> {
+        pub(super) fn new() -> Result<Self> {
             // SAFETY: epoll_create1 returns a descriptor or -1.
             let raw = check(unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) })?;
             // SAFETY: fresh descriptor, owned exclusively.
@@ -382,7 +382,7 @@ mod sys {
             mask
         }
 
-        fn ctl(&self, op: libc::c_int, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+        fn ctl(&self, op: libc::c_int, fd: i32, token: u64, interest: Interest) -> Result<()> {
             let mut event = libc::epoll_event {
                 events: Self::mask(interest),
                 u64: token,
@@ -392,15 +392,15 @@ mod sys {
             Ok(())
         }
 
-        pub(super) fn add(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+        pub(super) fn add(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
             self.ctl(libc::EPOLL_CTL_ADD, fd, token, interest)
         }
 
-        pub(super) fn modify(&self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
+        pub(super) fn modify(&self, fd: i32, token: u64, interest: Interest) -> Result<()> {
             self.ctl(libc::EPOLL_CTL_MOD, fd, token, interest)
         }
 
-        pub(super) fn remove(&self, fd: i32) -> io::Result<()> {
+        pub(super) fn remove(&self, fd: i32) -> Result<()> {
             // SAFETY: a null event is permitted for DEL on Linux 2.6.9 and up.
             check(unsafe {
                 libc::epoll_ctl(
@@ -413,7 +413,7 @@ mod sys {
             Ok(())
         }
 
-        pub(super) fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> io::Result<()> {
+        pub(super) fn wait(&self, out: &mut Vec<Event>, timeout_ns: Option<u64>) -> Result<()> {
             const CAPACITY: usize = 1024;
             let mut events: [libc::epoll_event; CAPACITY] =
                 // SAFETY: `epoll_event` is a packed integer pair; zero is valid.
@@ -440,8 +440,8 @@ mod sys {
                 )
             };
             if count < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
+                let error = Errno::last();
+                if error.interrupted() {
                     return Ok(());
                 }
                 return Err(error);
@@ -476,7 +476,7 @@ mod sys {
             Ok(())
         }
 
-        pub(super) fn wake(&self) -> io::Result<()> {
+        pub(super) fn wake(&self) -> Result<()> {
             let value: u64 = 1;
             // SAFETY: writing 8 bytes to an eventfd increments its counter.
             let written = unsafe {
@@ -487,10 +487,10 @@ mod sys {
                 )
             };
             if written < 0 {
-                let error = io::Error::last_os_error();
+                let error = Errno::last();
                 // EAGAIN means the counter is saturated, which already means a
                 // wake is pending. Nothing to do.
-                if error.kind() == io::ErrorKind::WouldBlock {
+                if error.would_block() {
                     return Ok(());
                 }
                 return Err(error);

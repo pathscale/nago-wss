@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use nago_wss::conn::{Connection, Role};
 use nago_wss::proto::message::{Limits, Message};
+use nago_wss::reactor::socket::Addr;
 use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
 
 /// Messages per sample in the round trip arm.
@@ -72,9 +73,16 @@ const SMALL: &[u8] = b"the quick brown fox jumps over the lazy dog";
 /// unlucky sample, and few enough to stay inside a few seconds.
 const SAMPLES: usize = 3;
 
+/// Loopback, port chosen by the kernel. For the tokio and sockudo arms.
 fn local() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
+
+/// The same, in this crate's own address type.
+fn local_addr() -> Addr {
+    Addr::localhost(0)
+}
+
 
 /// What a set of samples for one arm looks like.
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +107,7 @@ fn stats(mut values: Vec<Duration>) -> Stats {
 fn nago_round_trip() -> Duration {
     let reactor = Reactor::start().expect("reactor");
     let handle = reactor.handle();
-    let listener = TcpListener::bind(local(), &handle).expect("bind");
+    let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
     let addr = listener.local_addr().expect("addr");
 
     let server_handle = handle.clone();
@@ -116,7 +124,7 @@ fn nago_round_trip() -> Duration {
     });
 
     let elapsed = nagoya::block_on(async {
-        let stream = TcpStream::connect(addr, &handle).expect("connect");
+        let stream = TcpStream::connect(addr, &handle).await.expect("connect");
         let mut conn = Connection::new(stream, Role::Client, Limits::default());
         let payload = Bytes::from_static(SMALL);
 
@@ -138,7 +146,7 @@ fn nago_round_trip() -> Duration {
 fn nago_stream(payload_len: usize) -> Duration {
     let reactor = Reactor::start().expect("reactor");
     let handle = reactor.handle();
-    let listener = TcpListener::bind(local(), &handle).expect("bind");
+    let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
     let addr = listener.local_addr().expect("addr");
 
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -157,7 +165,7 @@ fn nago_stream(payload_len: usize) -> Duration {
     });
 
     let start = nagoya::block_on(async {
-        let stream = TcpStream::connect(addr, &handle).expect("connect");
+        let stream = TcpStream::connect(addr, &handle).await.expect("connect");
         let mut conn = Connection::new(stream, Role::Client, Limits::default());
         let payload = Bytes::from(vec![0x5Au8; payload_len]);
 

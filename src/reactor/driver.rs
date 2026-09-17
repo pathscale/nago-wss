@@ -42,11 +42,11 @@
 //! since taken the same index.
 
 use std::collections::HashMap;
-use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
+use super::error::Result;
 use super::poller::{Event, Interest, Poller};
 
 /// The wakers waiting on one descriptor.
@@ -119,7 +119,7 @@ impl Handle {
     /// The returned [`Registration`] must be kept for as long as the descriptor
     /// is in use; dropping it deregisters. `fd` must be non-blocking and must
     /// outlive the registration.
-    pub fn register(&self, fd: i32, interest: Interest) -> io::Result<Registration> {
+    pub fn register(&self, fd: i32, interest: Interest) -> Result<Registration> {
         let index = self.shared.next_index.fetch_add(1, Ordering::Relaxed);
 
         // A fresh index is never already present, so the generation starts at
@@ -154,7 +154,7 @@ impl Handle {
     }
 
     /// Wake the reactor thread if it is blocked.
-    pub fn wake(&self) -> io::Result<()> {
+    pub fn wake(&self) -> Result<()> {
         self.shared.poller.wake()
     }
 
@@ -164,7 +164,7 @@ impl Handle {
     /// reactor would have to ask the wheel on every pass just in case, which is
     /// the polling this design avoids. Calling it with a deadline further out
     /// than the one already cached is cheap and does not wake the thread.
-    pub fn timer_armed(&self, deadline: u64) -> io::Result<()> {
+    pub fn timer_armed(&self, deadline: u64) -> Result<()> {
         // Lower the cached deadline if this one is sooner. A racing update that
         // lowers it further simply wins; the loser's deadline is later and will
         // still be served when the earlier one fires.
@@ -231,7 +231,7 @@ impl Registration {
     }
 
     /// Change what this descriptor is watched for.
-    pub fn modify(&self, interest: Interest) -> io::Result<()> {
+    pub fn modify(&self, interest: Interest) -> Result<()> {
         self.shared.poller.modify(self.fd, self.token, interest)
     }
 }
@@ -261,7 +261,7 @@ pub struct Reactor {
 
 impl Reactor {
     /// Start the reactor.
-    pub fn start() -> io::Result<Self> {
+    pub fn start() -> Result<Self> {
         let shared = Arc::new(Shared {
             poller: Poller::new()?,
             slots: Mutex::new(HashMap::new()),
@@ -273,7 +273,14 @@ impl Reactor {
         let worker = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("nago-wss-reactor".into())
-            .spawn(move || run(&worker))?;
+            // The one place this crate still needs `std`: it owns a thread.
+            // Everything on the I/O path below is libc. A spawn failure is an
+            // OS refusal, so it is reported as one rather than as a new error
+            // kind that would exist for this single call.
+            .spawn(move || run(&worker))
+            .map_err(|error| {
+                super::error::Errno(error.raw_os_error().unwrap_or(libc::EAGAIN))
+            })?;
 
         Ok(Self {
             shared,

@@ -1,31 +1,18 @@
 //! Non-blocking TCP over the reactor.
 //!
-//! # Why `std::net` and not raw syscalls
+//! # No `std::net`
 //!
-//! The descriptors come from `std::net::TcpStream` and `TcpListener` rather
-//! than from `socket(2)` directly. `std` already carries the address parsing,
-//! the dual-stack handling and the platform differences in `connect`, all of
-//! which are tedious and none of which are interesting here. What `std` does
-//! not have is a way to *wait* without blocking a thread, and that is exactly
-//! what the reactor adds. Set the descriptor non-blocking, register it, and the
-//! standard type becomes an async one.
+//! The sockets come from [`socket`](super::socket), which is libc and nothing
+//! else. `std::net` was not slow - measured against raw `send`/`recv` the
+//! difference was inside the noise - but its interface is the wrong shape for
+//! a reactor and it was the last thing in this crate reaching for `std`.
 //!
-//! # Where `std::net`'s interface stops being enough
-//!
-//! The descriptors come from `std`, but two of its interfaces do not survive
-//! contact with a reactor and are bypassed here.
-//!
-//! `std::io::Read::read` takes `&mut [u8]`, which is initialised memory. The
-//! kernel is about to overwrite that memory, so zeroing it first is pure
-//! waste, and it is not free: 0.15us per read on a 16 KiB buffer, on every
-//! message. [`TcpStream::poll_read_buf`] calls `recv` directly into the
-//! uninitialised tail instead.
-//!
-//! `WouldBlock` as an `io::Error` is the other one. "Not ready" is the normal
-//! state of a reactive socket rather than a failure, and routing it through
-//! error construction and a `kind()` comparison is the wrong shape for the
-//! signal the whole design turns on. That one is absorbed here rather than
-//! fixed, since the syscall reports it through `errno` regardless.
+//! What that interface got wrong, concretely: non-blocking was a hidden mode
+//! rather than a type, so nothing stopped a blocking read on the reactor
+//! thread; `WouldBlock` arrived as an `io::Error` when "not ready" is the
+//! ordinary state of a reactive socket; and `io::Read::read` demanded
+//! initialised memory, which cost 0.15us per read zeroing bytes the kernel
+//! immediately overwrote.
 //!
 //! # The edge triggered contract
 //!
@@ -34,59 +21,79 @@
 //! for an edge that has already passed, and the task would hang with data
 //! sitting in the socket buffer.
 
-// This module owns the descriptor level calls that `std::io`'s traits cannot
-// express, so the crate wide deny is lifted here. Every block names what it
-// relies on.
+// Reading into uninitialised memory is the one thing this module does that the
+// safe subset cannot express; see `poll_read_buf`.
 #![allow(unsafe_code)]
 
-use std::io::{self, Read as _, Write as _};
-use std::net::{SocketAddr, TcpListener as StdListener, TcpStream as StdStream};
-use std::os::fd::AsRawFd;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use super::driver::{Handle, Registration};
+use super::error::{Errno, Result};
 use super::poller::Interest;
+use super::socket::{Addr, TcpListener as Listener, TcpSocket};
 
 /// A TCP connection that yields to the executor instead of blocking.
 #[derive(Debug)]
 pub struct TcpStream {
-    inner: StdStream,
+    inner: TcpSocket,
     registration: Registration,
 }
 
 impl TcpStream {
     /// Adopt an already connected socket.
     ///
-    /// The socket is put into non-blocking mode and registered for both
-    /// directions.
-    pub fn from_std(stream: StdStream, handle: &Handle) -> io::Result<Self> {
-        stream.set_nonblocking(true)?;
-        // Nagle interacts badly with a framed protocol: a small frame written
-        // on its own waits for an ack that is waiting for more data. Every
-        // WebSocket implementation worth using turns it off.
-        stream.set_nodelay(true)?;
-        let registration = handle.register(stream.as_raw_fd(), Interest::BOTH)?;
+    /// The socket is non-blocking from birth and has Nagle off already; this
+    /// only has to register it.
+    pub fn from_socket(socket: TcpSocket, handle: &Handle) -> Result<Self> {
+        let registration = handle.register(socket.raw(), Interest::BOTH)?;
         Ok(Self {
-            inner: stream,
+            inner: socket,
             registration,
         })
     }
 
-    /// Connect to `addr`.
+    /// Connect to `addr`, returning once the handshake has completed.
     ///
-    /// The connect itself is performed blocking, because a DNS-resolved connect
-    /// is a one-off at session start and making it async would mean owning
-    /// resolution too. The socket is non-blocking from the moment it is
-    /// connected, which is what the rest of the session needs.
-    pub fn connect(addr: SocketAddr, handle: &Handle) -> io::Result<Self> {
-        let stream = StdStream::connect(addr)?;
-        Self::from_std(stream, handle)
+    /// The socket is non-blocking, so the kernel's `connect` returns
+    /// immediately with `EINPROGRESS` and signals completion by making the
+    /// socket writable. Awaiting that here rather than handing it to the caller
+    /// is deliberate: a stream that is connected only eventually is a trap,
+    /// because the first write appears to succeed into the socket buffer and
+    /// the failure surfaces somewhere unrelated.
+    pub async fn connect(addr: Addr, handle: &Handle) -> Result<Self> {
+        let socket = TcpSocket::connect(addr)?;
+        let mut stream = Self::from_socket(socket, handle)?;
+        Connected { stream: &mut stream }.await?;
+        Ok(stream)
+    }
+
+    /// Start connecting without waiting for the handshake.
+    ///
+    /// For a caller that wants to overlap the wait with other work. It must
+    /// await [`Self::connected`] before treating the stream as usable.
+    pub fn connect_started(addr: Addr, handle: &Handle) -> Result<Self> {
+        let socket = TcpSocket::connect(addr)?;
+        Self::from_socket(socket, handle)
+    }
+
+    /// Wait for an in-flight connect to finish.
+    ///
+    /// A non-blocking connect reports failure by making the socket writable and
+    /// leaving the reason in `SO_ERROR`, which is indistinguishable from
+    /// success without asking. This asks.
+    pub async fn connected(&mut self) -> Result<()> {
+        Connected { stream: self }.await
     }
 
     /// The peer's address.
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+    pub fn peer_addr(&self) -> Result<Addr> {
         self.inner.peer_addr()
+    }
+
+    /// This socket's own address.
+    pub fn local_addr(&self) -> Result<Addr> {
+        self.inner.local_addr()
     }
 
     /// Read straight into a `BytesMut`'s spare capacity.
@@ -102,7 +109,7 @@ impl TcpStream {
         &mut self,
         cx: &mut Context<'_>,
         buffer: &mut bytes::BytesMut,
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<Result<usize>> {
         let spare = buffer.spare_capacity_mut();
         if spare.is_empty() {
             return Poll::Ready(Ok(0));
@@ -112,75 +119,53 @@ impl TcpStream {
         let filled = buffer.len();
 
         loop {
-            // `recv` into the uninitialised tail. This is the call
-            // `std::io::Read` cannot express: its signature demands an
-            // initialised slice, so going through it means zeroing memory the
-            // kernel is about to overwrite.
-            //
             // SAFETY: `spare_ptr` points at `spare_len` bytes of allocated
             // capacity owned by `buffer`, which outlives this call, and `recv`
-            // only ever writes within the length it is given. `buffer` is not
-            // aliased here: the spare region is beyond its length, so no live
-            // reference into the initialised part overlaps it.
-            let read = unsafe {
-                libc::recv(
-                    self.inner.as_raw_fd(),
-                    spare_ptr.cast::<libc::c_void>(),
-                    spare_len,
-                    0,
-                )
-            };
+            // only writes within the length it is given. The spare region is
+            // beyond the buffer's length, so no live reference overlaps it.
+            let result = unsafe { self.inner.recv(spare_ptr.cast::<u8>(), spare_len) };
 
-            if read >= 0 {
-                let read = read as usize;
-                // SAFETY: `recv` reported writing `read` bytes into the spare
-                // capacity, so that many bytes past `filled` are initialised.
-                unsafe { buffer.set_len(filled + read) };
-                return Poll::Ready(Ok(read));
-            }
-
-            let error = io::Error::last_os_error();
-            match error.kind() {
-                io::ErrorKind::WouldBlock => {
+            match result {
+                Ok(read) => {
+                    // SAFETY: `recv` reported writing `read` bytes into the
+                    // spare capacity, so that many past `filled` are live.
+                    unsafe { buffer.set_len(filled + read) };
+                    return Poll::Ready(Ok(read));
+                }
+                Err(error) if error.would_block() => {
                     self.registration.poll_readable(cx.waker());
                     return Poll::Pending;
                 }
-                io::ErrorKind::Interrupted => continue,
-                _ => return Poll::Ready(Err(error)),
+                Err(error) if error.interrupted() => continue,
+                Err(error) => return Poll::Ready(Err(error)),
             }
         }
     }
 
     /// Read into `buffer`, parking `cx`'s waker if the socket would block.
-    pub fn poll_read(&mut self, cx: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
+    pub fn poll_read(&mut self, cx: &mut Context<'_>, buffer: &mut [u8]) -> Poll<Result<usize>> {
         loop {
-            match self.inner.read(buffer) {
+            // SAFETY: `buffer` is a live initialised slice, so writing up to
+            // its length into it is in bounds.
+            let result =
+                unsafe { self.inner.recv(buffer.as_mut_ptr(), buffer.len()) };
+            match result {
                 Ok(n) => return Poll::Ready(Ok(n)),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if error.would_block() => {
                     // Drained: now it is safe to wait for the next edge.
                     self.registration.poll_readable(cx.waker());
                     return Poll::Pending;
                 }
                 // A signal interrupted the read; the data is still there.
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.interrupted() => continue,
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
     }
 
     /// Write from `buffer`, parking `cx`'s waker if the socket would block.
-    pub fn poll_write(&mut self, cx: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>> {
-        loop {
-            match self.inner.write(buffer) {
-                Ok(n) => return Poll::Ready(Ok(n)),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.registration.poll_writable(cx.waker());
-                    return Poll::Pending;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Poll::Ready(Err(error)),
-            }
-        }
+    pub fn poll_write(&mut self, cx: &mut Context<'_>, buffer: &[u8]) -> Poll<Result<usize>> {
+        self.poll_write_vectored(cx, &[], buffer)
     }
 
     /// Write two slices as one datagram to the kernel, without joining them.
@@ -194,16 +179,15 @@ impl TcpStream {
         cx: &mut Context<'_>,
         first: &[u8],
         second: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<Result<usize>> {
         loop {
-            let slices = [io::IoSlice::new(first), io::IoSlice::new(second)];
-            match self.inner.write_vectored(&slices) {
+            match self.inner.send_vectored(first, second) {
                 Ok(n) => return Poll::Ready(Ok(n)),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if error.would_block() => {
                     self.registration.poll_writable(cx.waker());
                     return Poll::Pending;
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.interrupted() => continue,
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
@@ -229,7 +213,7 @@ impl TcpStream {
     }
 
     /// Flush, which is a no-op for an unbuffered socket but completes the trait.
-    pub fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
 
@@ -265,6 +249,36 @@ impl TcpStream {
     }
 }
 
+/// The future returned by [`TcpStream::connected`].
+#[derive(Debug)]
+pub struct Connected<'a> {
+    stream: &'a mut TcpStream,
+}
+
+impl core::future::Future for Connected<'_> {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        // `SO_ERROR` is the authority on whether the handshake finished, but
+        // it reads zero both for "succeeded" and for "still going", so it
+        // cannot be the test on its own. `getpeername` distinguishes them: it
+        // only succeeds once there is a peer, which is exactly the condition
+        // being waited for.
+        match this.stream.inner.connect_error() {
+            Err(error) => return Poll::Ready(Err(error)),
+            Ok(()) if this.stream.inner.peer_addr().is_ok() => return Poll::Ready(Ok(())),
+            Ok(()) => {}
+        }
+
+        // Still in flight: the kernel makes the socket writable when it is
+        // done, either way.
+        this.stream.registration.poll_writable(cx.waker());
+        Poll::Pending
+    }
+}
+
 /// The future returned by [`TcpStream::read`].
 #[derive(Debug)]
 pub struct Read<'a> {
@@ -273,7 +287,7 @@ pub struct Read<'a> {
 }
 
 impl core::future::Future for Read<'_> {
-    type Output = io::Result<usize>;
+    type Output = Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -292,7 +306,7 @@ pub struct WriteAllVectored<'a> {
 }
 
 impl core::future::Future for WriteAllVectored<'_> {
-    type Output = io::Result<()>;
+    type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -309,12 +323,10 @@ impl core::future::Future for WriteAllVectored<'_> {
             };
 
             match this.stream.poll_write_vectored(cx, first, second) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "socket accepted no bytes",
-                    )));
-                }
+                // A socket that accepts nothing is not going to start; the
+                // peer has gone. Reported as a broken pipe, which is what the
+                // next write would have produced anyway.
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(Errno(libc::EPIPE))),
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -332,7 +344,7 @@ pub struct ReadBuf<'a> {
 }
 
 impl core::future::Future for ReadBuf<'_> {
-    type Output = io::Result<usize>;
+    type Output = Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -349,18 +361,16 @@ pub struct WriteAll<'a> {
 }
 
 impl core::future::Future for WriteAll<'_> {
-    type Output = io::Result<()>;
+    type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         while this.written < this.buffer.len() {
             match this.stream.poll_write(cx, &this.buffer[this.written..]) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "socket accepted no bytes",
-                    )));
-                }
+                // A socket that accepts nothing is not going to start; the
+                // peer has gone. Reported as a broken pipe, which is what the
+                // next write would have produced anyway.
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(Errno(libc::EPIPE))),
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -373,22 +383,28 @@ impl core::future::Future for WriteAll<'_> {
 /// A TCP listener that yields instead of blocking on `accept`.
 #[derive(Debug)]
 pub struct TcpListener {
-    inner: StdListener,
+    inner: Listener,
     registration: Registration,
     handle: Handle,
 }
 
 impl TcpListener {
+    /// How many pending connections the kernel will hold before refusing.
+    ///
+    /// Generous, because the cost is kernel memory per listener rather than
+    /// per connection, and a queue that overflows under a burst produces
+    /// refused connections that look like a server fault.
+    const BACKLOG: i32 = 1024;
+
     /// Bind to `addr` and register for incoming connections.
-    pub fn bind(addr: SocketAddr, handle: &Handle) -> io::Result<Self> {
-        let listener = StdListener::bind(addr)?;
-        Self::from_std(listener, handle)
+    pub fn bind(addr: Addr, handle: &Handle) -> Result<Self> {
+        let listener = Listener::bind(addr, Self::BACKLOG)?;
+        Self::from_listener(listener, handle)
     }
 
     /// Adopt an already bound listener.
-    pub fn from_std(listener: StdListener, handle: &Handle) -> io::Result<Self> {
-        listener.set_nonblocking(true)?;
-        let registration = handle.register(listener.as_raw_fd(), Interest::READABLE)?;
+    pub fn from_listener(listener: Listener, handle: &Handle) -> Result<Self> {
+        let registration = handle.register(listener.raw(), Interest::READABLE)?;
         Ok(Self {
             inner: listener,
             registration,
@@ -397,28 +413,29 @@ impl TcpListener {
     }
 
     /// The address this listener is bound to.
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+    pub fn local_addr(&self) -> Result<Addr> {
         self.inner.local_addr()
     }
 
     /// Accept one connection, parking `cx`'s waker if none is waiting.
-    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Result<(TcpStream, Addr)>> {
         loop {
             match self.inner.accept() {
-                Ok((stream, addr)) => {
+                Ok((socket, addr)) => {
                     return Poll::Ready(
-                        TcpStream::from_std(stream, &self.handle).map(|stream| (stream, addr)),
+                        TcpStream::from_socket(socket, &self.handle)
+                            .map(|stream| (stream, addr)),
                     );
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if error.would_block() => {
                     self.registration.poll_readable(cx.waker());
                     return Poll::Pending;
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.interrupted() => continue,
                 // A connection that died between the readiness event and the
                 // accept is not this listener's problem: drop it and look for
                 // the next one rather than failing the accept loop.
-                Err(error) if is_transient_accept_error(&error) => continue,
+                Err(error) if error.transient_accept() => continue,
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
@@ -430,20 +447,6 @@ impl TcpListener {
     }
 }
 
-/// Whether an `accept` error concerns only the connection being accepted.
-///
-/// These arrive when the peer resets between the readiness notification and the
-/// accept call. Failing the whole listener on one of them would let any client
-/// take the server down by connecting and immediately resetting.
-fn is_transient_accept_error(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionRefused
-    )
-}
-
 /// The future returned by [`TcpListener::accept`].
 #[derive(Debug)]
 pub struct Accept<'a> {
@@ -451,7 +454,7 @@ pub struct Accept<'a> {
 }
 
 impl core::future::Future for Accept<'_> {
-    type Output = io::Result<(TcpStream, SocketAddr)>;
+    type Output = Result<(TcpStream, Addr)>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.listener.poll_accept(cx)
@@ -462,10 +465,9 @@ impl core::future::Future for Accept<'_> {
 mod tests {
     use super::*;
     use crate::reactor::Reactor;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    fn local() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    /// Port zero: the kernel picks a free one, which `local_addr` reports.
+    fn local() -> Addr {
+        Addr::localhost(0)
     }
 
     #[test]
@@ -481,7 +483,7 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let mut stream = TcpStream::connect(addr, &client_handle).expect("connect");
+                let mut stream = TcpStream::connect(addr, &client_handle).await.expect("connect");
                 stream.write_all(b"ping").await.expect("write");
                 let mut buffer = [0u8; 4];
                 stream.read(&mut buffer).await.expect("read");
@@ -519,7 +521,7 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let mut stream = TcpStream::connect(addr, &client_handle).expect("connect");
+                let mut stream = TcpStream::connect(addr, &client_handle).await.expect("connect");
                 let payload = alloc::vec![0xABu8; SIZE];
                 stream.write_all(&payload).await.expect("write");
             })
@@ -554,9 +556,17 @@ mod tests {
         let listener = TcpListener::bind(local(), &handle).expect("bind");
         let addr = listener.local_addr().expect("addr");
 
+        let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
-            // Connect and drop immediately.
-            let _ = StdStream::connect(addr).expect("connect");
+            nagoya::block_on(async move {
+                // Connect properly, then hang up. Dropping a socket whose
+                // handshake is still in flight would be a different test, and
+                // a racy one: the server might never see a connection at all.
+                let stream = TcpStream::connect(addr, &client_handle)
+                    .await
+                    .expect("connect");
+                drop(stream);
+            });
         });
 
         let read = nagoya::block_on(async {

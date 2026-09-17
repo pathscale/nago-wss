@@ -38,15 +38,16 @@
 //! never masks, touches the payload zero times between the caller handing it
 //! over and the kernel taking it.
 
-use std::io;
-
 use bytes::{Bytes, BytesMut};
 
 use crate::proto::frame::{FrameError, Header};
 use crate::proto::message::{Assembler, Limits, Message, ProtocolError};
 use crate::proto::opcode::{CloseCode, OpCode};
 use crate::proto::{mask, message::CloseFrame};
+use crate::reactor::error::Errno;
 use crate::reactor::net::TcpStream;
+#[cfg(test)]
+use crate::reactor::socket::Addr;
 
 /// Which side of the connection this is.
 ///
@@ -65,7 +66,7 @@ pub enum Role {
 #[derive(Debug)]
 pub enum Error {
     /// The transport failed.
-    Io(io::Error),
+    Io(Errno),
     /// A frame could not be decoded.
     Frame(FrameError),
     /// A rule spanning frames was broken.
@@ -79,8 +80,8 @@ pub enum Error {
     UnexpectedEof,
 }
 
-impl From<io::Error> for Error {
-    fn from(value: io::Error) -> Self {
+impl From<Errno> for Error {
+    fn from(value: Errno) -> Self {
         Self::Io(value)
     }
 }
@@ -97,6 +98,7 @@ impl core::fmt::Display for Error {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -390,10 +392,25 @@ fn encode_close_body(frame: Option<CloseFrame>) -> Bytes {
 mod tests {
     use super::*;
     use crate::reactor::{Reactor, TcpListener};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    /// Port zero: the kernel picks a free one, which `local_addr` reports.
+    fn local() -> Addr {
+        Addr::localhost(0)
+    }
 
-    fn local() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    /// The same address as `std` spells it.
+    ///
+    /// Several tests below deliberately put a plain `std::net` socket on the
+    /// other end: checking that this crate interoperates with an ordinary TCP
+    /// stack is worth more than checking it agrees with itself.
+    fn std_addr(addr: Addr) -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], addr.port()))
+    }
+
+    /// A `std` listener, and the address to reach it on.
+    fn std_listener() -> (std::net::TcpListener, Addr) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        (listener, Addr::localhost(port))
     }
 
     /// Run a client and a server against each other over real TCP.
@@ -414,6 +431,7 @@ mod tests {
         let client_thread = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let stream = crate::reactor::TcpStream::connect(addr, &client_handle)
+                    .await
                     .expect("connect");
                 client(Connection::new(stream, Role::Client, Limits::default()));
             });
@@ -579,7 +597,7 @@ mod tests {
 
         let client = std::thread::spawn(move || {
             use std::io::Write as _;
-            let mut raw = std::net::TcpStream::connect(addr).expect("connect");
+            let mut raw = std::net::TcpStream::connect(std_addr(addr)).expect("connect");
             // FIN + text, length 2, no mask bit.
             raw.write_all(&[0x81, 0x02, b'h', b'i']).expect("write");
             // Hold the connection open so the server sees the frame, not an EOF.
@@ -604,14 +622,13 @@ mod tests {
         // and the payload is not on the wire in cleartext.
         let reactor = Reactor::start().expect("reactor");
         let handle = reactor.handle();
-        let listener = std::net::TcpListener::bind(local()).expect("bind");
-        let addr = listener.local_addr().expect("addr");
+        let (listener, addr) = std_listener();
 
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let stream =
-                    crate::reactor::TcpStream::connect(addr, &client_handle).expect("connect");
+                    crate::reactor::TcpStream::connect(addr, &client_handle).await.expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());
                 client
                     .write(Message::Text(Bytes::from_static(b"secret")))
@@ -643,14 +660,13 @@ mod tests {
         // thing masking exists to prevent.
         let reactor = Reactor::start().expect("reactor");
         let handle = reactor.handle();
-        let listener = std::net::TcpListener::bind(local()).expect("bind");
-        let addr = listener.local_addr().expect("addr");
+        let (listener, addr) = std_listener();
 
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let stream =
-                    crate::reactor::TcpStream::connect(addr, &client_handle).expect("connect");
+                    crate::reactor::TcpStream::connect(addr, &client_handle).await.expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());
                 for _ in 0..4 {
                     client
