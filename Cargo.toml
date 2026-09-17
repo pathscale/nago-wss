@@ -31,3 +31,12 @@ libc = { version = "^0.2.189", default-features = false, optional = true }
 nagoya = { path = "../nagoya", optional = true }
 
 [dev-dependencies]
+# The comparison arm, and the only reason these are here. Same version
+# endpoint-libs pins, so the number reflects what the fleet actually runs.
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+[[bench]]
+name = "echo"
+harness = false

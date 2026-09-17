@@ -17,6 +17,23 @@
 //! The buffer compacts rather than growing without bound: once a frame is
 //! consumed the remainder shifts down, so a long-lived connection sending small
 //! frames keeps a small buffer.
+//!
+//! # Why writes are not buffered
+//!
+//! A frame goes to the socket as soon as it is written. The obvious speedup is
+//! to hold frames and flush them together, turning a syscall per message into
+//! one per batch, and it does measure faster on a throughput benchmark.
+//!
+//! It is the wrong trade. A held frame is one the peer cannot see, so the
+//! latency of any message comes to depend on what the sender happens to do
+//! next. On a request/response connection, which is what the fleet runs, that
+//! is a reply sitting in memory waiting for traffic that may never arrive. The
+//! failure is not theoretical: the first version of this crate buffered, and
+//! the streaming benchmark deadlocked on the spot, a sender holding frames a
+//! receiver was already blocked waiting for.
+//!
+//! So the encode scratch is reused between frames, which costs no latency and
+//! saves an allocation per message, and the write itself is immediate.
 
 use std::io;
 
@@ -94,6 +111,12 @@ pub struct Connection {
     assembler: Assembler,
     /// Unparsed bytes from the socket.
     read_buffer: BytesMut,
+    /// Scratch for encoding one frame, reused across frames.
+    ///
+    /// Not a write buffer: it holds exactly one frame and the write that
+    /// follows empties it. It exists so framing does not allocate per message,
+    /// and it delays nothing.
+    scratch: Vec<u8>,
     /// The next masking key to use, for a client. See [`Self::next_mask`].
     mask_state: u64,
     /// Set once a close frame has been sent, so it is not sent twice.
@@ -111,6 +134,7 @@ impl Connection {
             role,
             assembler: Assembler::new(limits),
             read_buffer: BytesMut::with_capacity(8 * 1024),
+            scratch: Vec::with_capacity(8 * 1024),
             mask_state: seed_from(&stream_seed()),
             close_sent: false,
         }
@@ -245,7 +269,13 @@ impl Connection {
         // Header and payload go out in one write. Two writes would put a frame
         // header on the wire in its own segment, which with a filled send
         // buffer can leave a peer holding a header and waiting for a body.
-        let mut out = Vec::with_capacity(header.encoded_len() + payload.len());
+        // The scratch is moved out and put back rather than allocated: it
+        // belongs to the connection, and taking it is what lets the socket
+        // borrow it while `self` is already borrowed for the write.
+        let mut out = core::mem::take(&mut self.scratch);
+        out.clear();
+        out.reserve(header.encoded_len() + payload.len());
+
         let mut header_bytes = [0u8; Header::MAX_ENCODED_LEN];
         let written = header
             .encode(&mut header_bytes)
@@ -254,11 +284,12 @@ impl Connection {
         out.extend_from_slice(payload);
 
         if let Some(key) = mask {
-            let body = &mut out[written..];
-            mask::apply(body, key, 0);
+            mask::apply(&mut out[written..], key, 0);
         }
 
-        self.stream.write_all(&out).await?;
+        let result = self.stream.write_all(&out).await;
+        self.scratch = out;
+        result?;
         Ok(())
     }
 
