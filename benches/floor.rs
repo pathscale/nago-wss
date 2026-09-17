@@ -43,8 +43,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use nago_wss::reactor::socket::Addr;
-use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
+use nagoya::reactor::Addr;
+use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
 const ROUND_TRIPS: usize = 500;
 const SAMPLES: usize = 3;
@@ -69,8 +69,8 @@ fn best(mut values: Vec<Duration>) -> Duration {
 /// This is the arrangement tokio's current-thread runtime uses, and the one
 /// the threaded reactor below pays a park and unpark per message to avoid.
 fn nago_local_floor() -> Duration {
-    use nago_wss::reactor::block_on_with;
-    use nago_wss::reactor::Reactor;
+    use nagoya::reactor::block_on_with;
+    use nagoya::reactor::Reactor;
 
     let reactor = Reactor::local().expect("reactor");
     let handle = reactor.handle();

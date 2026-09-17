@@ -16,11 +16,25 @@
 //!   No I/O, no runtime, no allocator beyond `alloc`. It is `no_std`, it is
 //!   exhaustively testable without a socket, and it is the part that has to be
 //!   correct.
-//! * The reactor (in progress) — readiness over kqueue/epoll, driving the core.
+//! * The connection, where that core meets a socket. It is generic over
+//!   [`stream::ByteStream`], so the same code runs over TCP, over TLS, or over
+//!   an in-memory pipe in a test.
 //!
-//! Nagoya deliberately ships no I/O driver ("a caller that wants sockets brings
-//! its own reactor"), so the reactor lives here rather than there. Nagoya
-//! supplies the scheduler, `sync` and `time`; this crate supplies the sockets.
+//! The readiness reactor was written here and now lives in
+//! [`nagoya::reactor`], because generational tokens, edge triggered
+//! registration and integrating a timer wheel without polling it are the same
+//! problem for anything that wants a socket, and none of it was about
+//! WebSockets. Nagoya supplies the scheduler, `sync`, `time` and now the
+//! sockets; this crate supplies the protocol.
+//!
+//! # Unsafe
+//!
+//! One block, in [`client`]: the `getaddrinfo` binding that turns a hostname
+//! into addresses. The syscall bindings that used to sit beside it left with
+//! the reactor. Resolution has not followed yet only because nagoya has no
+//! resolver to follow into, and it is the same kind of thing: anything that
+//! connects to a name needs it, and everyone who writes it writes the same
+//! dual stack bug.
 //!
 //! # Only what is used
 //!
@@ -32,8 +46,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
 // Denied rather than forbidden, so that exactly one module can opt out and say
-// why. `proto` is unsafe-free and stays that way; the syscall bindings in
-// `reactor::poller` cannot be, since calling the kernel is the whole job.
+// why. Everything but the resolver in `client` is unsafe-free, and `proto`
+// forbids it outright.
 #![deny(unsafe_code)]
 
 extern crate alloc;
@@ -42,11 +56,11 @@ pub mod proto;
 
 pub use proto::{CloseCode, FrameError, Header, OpCode};
 
-/// The I/O side. See the module for why the reactor lives here.
+/// The transport a connection runs over, and the fast paths a socket has.
 #[cfg(feature = "reactor")]
-pub mod reactor;
+pub mod stream;
 
-/// A live WebSocket connection, where the protocol meets the reactor.
+/// A live WebSocket connection, where the protocol meets a socket.
 #[cfg(feature = "reactor")]
 pub mod conn;
 

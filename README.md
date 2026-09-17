@@ -15,27 +15,28 @@ frames in, bytes out. It is `no_std` plus `alloc`, it forbids `unsafe`, and it
 is testable exhaustively without a socket. This is the part that has to be
 correct.
 
-**The reactor** is readiness over kqueue/epoll, driving the core. It is fully
-event driven: the thread blocks in `kevent`/`epoll_wait`, which is an
-interrupt-driven kernel wait, and is woken by a descriptor changing state, by an
-expiring deadline, or by an explicit wake. There is no tick, no retry interval
-and no spin anywhere in the crate.
+**The connection** joins that core to a socket. It is generic over
+`stream::ByteStream`, so the same code runs over TCP, over TLS, or over an
+in-memory pipe in a test, and it enforces the masking rules in both directions.
 
-Timers are event driven in the same sense, which takes a little care. The next
-deadline is cached in an atomic, and nagoya's timer wheel is consulted only when
-that deadline actually arrives or when a caller arms a sooner one. The naive
-version asks the wheel on every wakeup, which means a connection delivering ten
-thousand readiness events a second takes the timer lock ten thousand times to
-learn that nothing is due. Socket traffic and timer work stay independent.
+The readiness reactor was written here and now lives in
+[nagoya](https://github.com/pathscale/nagoya) as `nagoya::reactor`. It was moved
+because none of it was about WebSockets: generational tokens, edge triggered
+registration and integrating a timer wheel without polling it are the same
+problem for anything that wants a socket, and the ways of getting them wrong are
+quiet ones. It is still fully event driven, with no tick, no retry interval and
+no spin, and the timer integration still caches the next deadline so a socket
+delivering ten thousand events a second never takes the timer lock to be told
+nothing is due.
 
-[Nagoya](https://github.com/pathscale/nagoya) deliberately ships no I/O driver:
-*"a caller that wants sockets brings its own reactor."* So the reactor lives
-here. Nagoya supplies the scheduler, `sync` and `time`, which is most of what a
-WebSocket stack actually takes from a runtime; this crate supplies the sockets.
+What that left behind is a crate with almost no platform in it. The syscall
+bindings went with the reactor, and one `unsafe` block remains: the
+`getaddrinfo` binding in `client`, which turns a hostname into addresses.
+Nagoya has no resolver yet, and that is the only reason it is still here.
 
 The split costs nothing at runtime. There are no trait objects across it and no
-per-frame allocation on either path, so the reactor's calls into the core
-monomorphise exactly as if the layering were not there.
+per-frame allocation on either path, so the calls into the core monomorphise
+exactly as if the layering were not there.
 
 ## Only what is used
 
@@ -132,15 +133,14 @@ The protocol core:
   message-level size cap
 - the opening handshake, checked against the worked example in the RFC
 
-The reactor:
+The connection, over whatever `nagoya::reactor` or a TLS session provides:
 
-- kqueue and epoll behind one type, edge triggered
-- generational tokens, so a readiness event in flight when a registration is
-  dropped cannot wake whatever later takes the same slot
-- async `TcpStream` and `TcpListener`, draining to `EWOULDBLOCK` before parking
-  a waker
-
-The connection joins the two, enforcing the masking rules in both directions.
+- the masking rules, enforced in both directions
+- a read path that parses every frame already buffered before returning to the
+  socket, so a batch of messages costs one syscall rather than one each
+- the fast paths a socket has and a general stream does not, behind `StreamExt`:
+  reading into a `BytesMut`'s uninitialised tail, and writing a frame header and
+  its payload without joining them
 
 Conformance: **the Autobahn suite passes, 301 of 301 cases.** It runs in CI on
 every push, against the echo server in `examples/autobahn_server.rs`, and the

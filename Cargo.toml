@@ -1,6 +1,6 @@
 [package]
 name = "nago-wss"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ default = ["std", "reactor", "tls", "webpki-roots"]
 std = []
 # The readiness reactor: kqueue/epoll, sockets, and the futures over them.
 # Needs `std` for `io::Error` and owned descriptors.
-reactor = ["std", "dep:libc", "dep:nagoya"]
+reactor = ["std", "dep:nagoya", "dep:libc"]
 # wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
 # rather than a second I/O stack.
 tls = ["reactor", "dep:nago-rustls"]
@@ -38,20 +38,28 @@ simdutf8 = { version = "0.1", optional = true }
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
 
-# The platform, for the reactor only. A crate wrapping libc is still a crate
-# that links no Rust std of its own; the ban is on std, and the platform already
-# provides libc. Same version the house uses in ekostd.
-libc = { version = "^0.2.189", default-features = false, optional = true }
 # TLS, as its own crate. The loop that drives rustls turned out to have
 # nothing to do with WebSockets, so it lives in nago-rustls and this crate is
 # one of its consumers rather than its owner.
-nago-rustls = { version = "0.1", path = "../nago-rustls", optional = true }
+nago-rustls = { version = "0.1.1", path = "../nago-rustls", optional = true }
 
-# The scheduler, sync and time this crate does not implement. Nagoya ships no
-# I/O driver on purpose, which is why the reactor below is ours and not its.
-nagoya = { path = "../nagoya", optional = true }
+# The runtime underneath: the scheduler, sync, time, and since 0.1.4 the
+# readiness reactor and its sockets. That reactor was written here and moved
+# there, because generational tokens and edge triggered registration are the
+# same problem for anything that wants a socket, and none of it was about
+# WebSockets.
+nagoya = { version = "0.1.4", path = "../nagoya", features = ["reactor"], optional = true }
+# Name resolution only. `getaddrinfo` is the one syscall this crate still binds
+# itself, because nagoya has no resolver to take it. Everything else that
+# called the kernel left with the reactor.
+libc = { version = "^0.2.189", default-features = false, optional = true }
 
 [dev-dependencies]
+# The reactor the benchmarks and the Autobahn server run on. A dev dependency
+# rather than a plain one because this crate is generic over its transport: a
+# consumer supplies the socket, so only the things here that need a running
+# one name it.
+nagoya = { version = "0.1.4", path = "../nagoya", features = ["reactor"] }
 # Test certificates, generated in process. Same version endpoint-libs uses.
 rcgen = "0.14"
 # The comparison arm, and the only reason these are here. Same version

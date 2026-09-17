@@ -37,4 +37,4 @@ pub use nago_rustls::{rustls, rustls_pki_types};
 /// syscall-level trick and a TLS session's reads come out of rustls' own
 /// buffer; a vectored write cannot help either, because the header and the
 /// payload are both encrypted into one record regardless.
-impl<S: nagoya::io::Stream> crate::reactor::bytes::StreamExt for TlsSession<S> {}
+impl<S: nagoya::io::Stream> crate::stream::StreamExt for TlsSession<S> {}

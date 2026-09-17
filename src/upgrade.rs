@@ -14,7 +14,7 @@ use crate::proto::handshake::{
     parse_request, Request, UpgradeError, DEFAULT_MAX_HEAD,
 };
 use crate::proto::message::Limits;
-use crate::reactor::bytes::{ByteStream, StreamExt};
+use crate::stream::{ByteStream, StreamExt};
 
 impl From<UpgradeError> for Error {
     fn from(value: UpgradeError) -> Self {
@@ -125,9 +125,9 @@ pub async fn connect<S: ByteStream + StreamExt>(
 mod tests {
     use super::*;
     use crate::proto::message::Message;
-    use crate::reactor::socket::Addr;
-    use crate::reactor::{Reactor, TcpListener, TcpStream};
     use bytes::Bytes;
+    use nagoya::reactor::Addr;
+    use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
     #[test]
     fn a_full_handshake_then_messages() {

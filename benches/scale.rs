@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use nago_wss::conn::{Connection, Role};
 use nago_wss::proto::message::{Limits, Message};
-use nago_wss::reactor::socket::Addr;
-use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
+use nagoya::reactor::Addr;
+use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
 /// Connection counts to try, in order. The run stops at the first count an
 /// arm cannot reach, which is itself the answer.

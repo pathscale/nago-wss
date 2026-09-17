@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "nago-rustls"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nagoya",
  "rustls",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "nago-wss"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -440,8 +440,10 @@ name = "nagoya"
 version = "0.1.4"
 dependencies = [
  "async-task",
+ "bytes",
  "futures-io",
  "futures-util",
+ "libc",
  "ps-st3",
  "spin",
 ]

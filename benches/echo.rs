@@ -54,8 +54,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use nago_wss::conn::{Connection, Role};
 use nago_wss::proto::message::{Limits, Message};
-use nago_wss::reactor::socket::Addr;
-use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
+use nagoya::reactor::Addr;
+use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
 /// Messages per sample in the round trip arm.
 ///

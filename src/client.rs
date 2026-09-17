@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 
 use crate::conn::{Connection, Error};
 use crate::proto::message::Limits;
-use crate::reactor::driver::Handle;
-use crate::reactor::error::Errno;
-use crate::reactor::net::TcpStream;
-use crate::reactor::socket::Addr;
+use crate::stream::Errno;
+use nagoya::reactor::Addr;
+use nagoya::reactor::Handle;
+use nagoya::reactor::TcpStream;
 
 /// A parsed `ws://` or `wss://` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,11 +408,11 @@ mod tests {
         // The whole stack in one test: resolve, connect, TLS handshake,
         // WebSocket upgrade, a message each way. Every layer this crate has.
         use crate::proto::message::Message;
-        use crate::reactor::{Reactor, TcpListener};
         use crate::tls::rustls;
         use crate::tls::rustls_pki_types::{CertificateDer, PrivateKeyDer};
         use alloc::sync::Arc;
         use bytes::Bytes;
+        use nagoya::reactor::{Reactor, TcpListener};
 
         let issued =
             rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
