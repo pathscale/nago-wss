@@ -15,14 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone the sibling path dependencies
-        # Prefer a nagoya branch of the same name, so a change that spans both
-        # crates builds against its own other half rather than against master.
-        # This branch needs one: `syscall-counters` is a nagoya feature that
-        # does not exist on master or in any published version, and resolving
-        # against master fails before a single test runs. Falls back to master,
-        # which is the steady state once the paired branch has merged.
+        # This branch needs an unmerged nagoya: `syscall-counters` is a nagoya
+        # feature that exists on perf/local-reactor-scratch and nowhere else,
+        # not on master and not in any published version, so resolving against
+        # master fails before a single test runs.
+        #
+        # Named explicitly rather than derived from this branch's name: the two
+        # branches are not called the same thing, and a $GITHUB_HEAD_REF lookup
+        # silently falls back to master and fails exactly as before.
+        #
+        # Delete the first clone once nagoya#9 has merged. The fallback is the
+        # steady state and works on its own from then on.
         run: |
-          git clone --depth 1 --branch "$GITHUB_HEAD_REF" \
+          git clone --depth 1 --branch perf/local-reactor-scratch \
             https://github.com/pathscale/nagoya.git ../nagoya \
             || git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
           git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
@@ -37,14 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone the sibling path dependencies
-        # Prefer a nagoya branch of the same name, so a change that spans both
-        # crates builds against its own other half rather than against master.
-        # This branch needs one: `syscall-counters` is a nagoya feature that
-        # does not exist on master or in any published version, and resolving
-        # against master fails before a single test runs. Falls back to master,
-        # which is the steady state once the paired branch has merged.
+        # This branch needs an unmerged nagoya: `syscall-counters` is a nagoya
+        # feature that exists on perf/local-reactor-scratch and nowhere else,
+        # not on master and not in any published version, so resolving against
+        # master fails before a single test runs.
+        #
+        # Named explicitly rather than derived from this branch's name: the two
+        # branches are not called the same thing, and a $GITHUB_HEAD_REF lookup
+        # silently falls back to master and fails exactly as before.
+        #
+        # Delete the first clone once nagoya#9 has merged. The fallback is the
+        # steady state and works on its own from then on.
         run: |
-          git clone --depth 1 --branch "$GITHUB_HEAD_REF" \
+          git clone --depth 1 --branch perf/local-reactor-scratch \
             https://github.com/pathscale/nagoya.git ../nagoya \
             || git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
           git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
@@ -63,14 +73,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone the sibling path dependencies
-        # Prefer a nagoya branch of the same name, so a change that spans both
-        # crates builds against its own other half rather than against master.
-        # This branch needs one: `syscall-counters` is a nagoya feature that
-        # does not exist on master or in any published version, and resolving
-        # against master fails before a single test runs. Falls back to master,
-        # which is the steady state once the paired branch has merged.
+        # This branch needs an unmerged nagoya: `syscall-counters` is a nagoya
+        # feature that exists on perf/local-reactor-scratch and nowhere else,
+        # not on master and not in any published version, so resolving against
+        # master fails before a single test runs.
+        #
+        # Named explicitly rather than derived from this branch's name: the two
+        # branches are not called the same thing, and a $GITHUB_HEAD_REF lookup
+        # silently falls back to master and fails exactly as before.
+        #
+        # Delete the first clone once nagoya#9 has merged. The fallback is the
+        # steady state and works on its own from then on.
         run: |
-          git clone --depth 1 --branch "$GITHUB_HEAD_REF" \
+          git clone --depth 1 --branch perf/local-reactor-scratch \
             https://github.com/pathscale/nagoya.git ../nagoya \
             || git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
           git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
