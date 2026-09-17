@@ -18,7 +18,7 @@ std = []
 reactor = ["std", "dep:libc", "dep:nagoya"]
 # wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
 # rather than a second I/O stack.
-tls = ["reactor", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+tls = ["reactor", "dep:nago-rustls"]
 
 [dependencies]
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
@@ -29,13 +29,10 @@ bytes = { version = "1.7", default-features = false }
 # that links no Rust std of its own; the ban is on std, and the platform already
 # provides libc. Same version the house uses in ekostd.
 libc = { version = "^0.2.189", default-features = false, optional = true }
-# TLS. rustls is already sans-io: read_tls, write_tls and process_new_packets
-# take byte buffers and know nothing about a runtime, which is the same shape
-# this crate's protocol core has. So there is no fork to maintain and no
-# tokio-rustls in the graph, only the small amount of glue in `tls`.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"], optional = true }
-rustls-pki-types = { version = "1", optional = true }
-webpki-roots = { version = "1", optional = true }
+# TLS, as its own crate. The loop that drives rustls turned out to have
+# nothing to do with WebSockets, so it lives in nago-rustls and this crate is
+# one of its consumers rather than its owner.
+nago-rustls = { version = "0.1", path = "../nago-rustls", optional = true }
 
 # The scheduler, sync and time this crate does not implement. Nagoya ships no
 # I/O driver on purpose, which is why the reactor below is ours and not its.
