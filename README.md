@@ -15,7 +15,18 @@ frames in, bytes out. It is `no_std` plus `alloc`, it forbids `unsafe`, and it
 is testable exhaustively without a socket. This is the part that has to be
 correct.
 
-**The reactor** (in progress) is readiness over kqueue/epoll, driving the core.
+**The reactor** is readiness over kqueue/epoll, driving the core. It is fully
+event driven: the thread blocks in `kevent`/`epoll_wait`, which is an
+interrupt-driven kernel wait, and is woken by a descriptor changing state, by an
+expiring deadline, or by an explicit wake. There is no tick, no retry interval
+and no spin anywhere in the crate.
+
+Timers are event driven in the same sense, which takes a little care. The next
+deadline is cached in an atomic, and nagoya's timer wheel is consulted only when
+that deadline actually arrives or when a caller arms a sooner one. The naive
+version asks the wheel on every wakeup, which means a connection delivering ten
+thousand readiness events a second takes the timer lock ten thousand times to
+learn that nothing is due. Socket traffic and timer work stay independent.
 
 [Nagoya](https://github.com/pathscale/nagoya) deliberately ships no I/O driver:
 *"a caller that wants sockets brings its own reactor."* So the reactor lives
@@ -44,7 +55,9 @@ value. It is not a general-purpose hash and should not be used as one.
 
 ## Status
 
-The protocol core is done and tested:
+Working end to end over real TCP, with no tokio in the path.
+
+The protocol core:
 
 - frame header codec, strict about the things the RFC says to fail on
   (reserved bits and opcodes, oversized or fragmented control frames,
@@ -55,4 +68,14 @@ The protocol core is done and tested:
   message-level size cap
 - the opening handshake, checked against the worked example in the RFC
 
-The reactor is next.
+The reactor:
+
+- kqueue and epoll behind one type, edge triggered
+- generational tokens, so a readiness event in flight when a registration is
+  dropped cannot wake whatever later takes the same slot
+- async `TcpStream` and `TcpListener`, draining to `EWOULDBLOCK` before parking
+  a waker
+
+The connection joins the two, enforcing the masking rules in both directions.
+
+Still to come: TLS, the HTTP upgrade, and the `endpoint-libs` adapter.
