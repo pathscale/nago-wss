@@ -68,6 +68,10 @@ harness = false
 name = "scale"
 harness = false
 
+[[bench]]
+name = "micro"
+harness = false
+
 # A diagnostic rather than a benchmark: it attributes the floor to its layers.
 [[example]]
 name = "floor_probe"
