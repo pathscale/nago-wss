@@ -53,6 +53,70 @@ WebSocket handshake, and SHA-1's collision weaknesses do not bear on that.
 The implementation in `proto::handshake` is private and exists for that one
 value. It is not a general-purpose hash and should not be used as one.
 
+## Numbers
+
+Protocol core, no sockets, on an M-series laptop. Rates are operations per
+second; the three arms are this crate, tungstenite (what the fleet runs today)
+and sockudo-ws, each through its own public entry point.
+
+### Masking
+
+Every byte a client sends and every byte a server receives.
+
+| payload | nago-wss | tungstenite | sockudo-ws |
+|---|---|---|---|
+| 64 B | **73.8M/s** (4.72 GB/s) | 32.8M/s (2.10) | 19.0M/s (1.22) |
+| 1 KB | **8.8M/s** (8.99) | 8.4M/s (8.64) | 4.4M/s (4.56) |
+| 16 KB | **905K/s** (14.82) | 496K/s (8.12) | 188K/s (3.08) |
+| 256 KB | **53.7K/s** (14.07) | 35.9K/s (9.40) | 10.7K/s (2.81) |
+
+A 64-bit word loop, which beats tungstenite's 32-bit one and beats
+sockudo-ws's SIMD. No unsafe.
+
+### UTF-8 validation
+
+Text frames only; binary skips it. With `simd-utf8` on.
+
+| payload | nago-wss | tungstenite | sockudo-ws |
+|---|---|---|---|
+| ascii 1 KB | **17.46 GB/s** | 9.07 | 4.01 |
+| ascii 16 KB | 23.37 | 2.06 | **28.85** |
+| mixed 1 KB | 0.88 | 0.22 | **1.58** |
+| mixed 16 KB | 1.33 | 0.26 | **2.23** |
+
+Without the feature this is the standard library's byte loop and sockudo-ws is
+eight times faster. With it, that gap closes to between 1.1 and 1.8, and
+tungstenite is two to five times behind.
+
+### A whole message
+
+Encode, mask, decode, unmask, reassemble.
+
+| payload | rate |
+|---|---|
+| 64 B | 7.7M msg/s |
+| 1 KB | 1.6M msg/s |
+| 16 KB | 242K msg/s |
+
+### Ten thousand connections
+
+Both ends in one process, so every arm is handicapped the same way.
+
+| | establish | broadcast | memory |
+|---|---|---|---|
+| nago-wss | **0.89 s** | **194 ms** | 42 KB/conn |
+| tokio-tungstenite | 2.11 s | 475 ms | 151 KB/conn |
+| sockudo-ws | 4.18 s | 263 ms | **35 KB/conn** |
+
+### Where this loses
+
+A single connection doing one round trip at a time on loopback: about 17.8us
+against tokio's 14.7. Most of that is neither crate's, a unix socketpair does
+the same handoff in 4.9us against loopback TCP's 12.1, but the remaining
+difference is real and not yet explained.
+
+Run them with `cargo bench --bench micro`, `--bench scale`, `--bench floor`.
+
 ## Status
 
 Working end to end over real TCP, with no tokio in the path.
@@ -78,4 +142,10 @@ The reactor:
 
 The connection joins the two, enforcing the masking rules in both directions.
 
-Still to come: TLS, the HTTP upgrade, and the `endpoint-libs` adapter.
+Conformance: 25 cases from RFC 6455 run under `cargo test`, covering
+fragmentation, reserved bits and opcodes, control frame rules, close codes,
+non-minimal lengths and the malformed UTF-8 sequences Autobahn's 6.x cases are
+built from. Written directly rather than run through Autobahn, which ships as
+a Docker image.
+
+Still to come: the `endpoint-libs` adapter.
