@@ -142,10 +142,16 @@ The reactor:
 
 The connection joins the two, enforcing the masking rules in both directions.
 
-Conformance: 25 cases from RFC 6455 run under `cargo test`, covering
-fragmentation, reserved bits and opcodes, control frame rules, close codes,
-non-minimal lengths and the malformed UTF-8 sequences Autobahn's 6.x cases are
-built from. Written directly rather than run through Autobahn, which ships as
-a Docker image.
+Conformance: 38 cases from RFC 6455 run under `cargo test`, covering
+fragmentation and its interleaving rules, reserved bits and opcodes, control
+frame limits, the close code registry, every length encoding boundary, the
+first and last codepoint of each UTF-8 width, truncated and overlong
+sequences, and a quarter megabyte message reassembled from fragments.
+
+**Autobahn itself has not been run.** It ships as a Docker image and `wstest`
+needs Python 2, so these cases are written from its specifications rather than
+driven by it. That is thirty eight of its five hundred: the rules are covered,
+but a suite catches what its author did not think to test, and this one cannot
+make that claim.
 
 Still to come: the `endpoint-libs` adapter.

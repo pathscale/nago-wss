@@ -387,3 +387,252 @@ fn a_message_reassembled_past_the_limit_is_refused() {
         Err(ProtocolError::MessageTooLarge)
     );
 }
+
+// --- 1.x  the length boundaries ------------------------------------------
+
+#[test]
+fn case_1_1_x_every_length_encoding_round_trips() {
+    // Autobahn walks these sizes because each one crosses a boundary in the
+    // length field: 125 is the last 7-bit value, 126 forces the 16-bit form,
+    // and 65536 forces the 64-bit form.
+    for size in [0usize, 1, 125, 126, 127, 65535, 65536] {
+        let payload = vec![0x5Au8; size];
+        let mut a = assembler();
+        let message = feed(&mut a, &frame(OpCode::Binary, true, &payload))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Binary(Bytes::from(payload)),
+            "length {size} did not round trip"
+        );
+    }
+}
+
+// --- 5.x  more fragmentation ---------------------------------------------
+
+#[test]
+fn case_5_2_a_message_in_many_small_fragments_reassembles() {
+    // One byte per frame, which is legal and which a naive reassembler that
+    // assumes a frame is a message gets wrong.
+    let mut a = assembler();
+    let text = b"fragmented";
+    for (index, byte) in text.iter().enumerate() {
+        let first = index == 0;
+        let last = index == text.len() - 1;
+        let opcode = if first { OpCode::Text } else { OpCode::Continuation };
+        let result = feed(&mut a, &frame(opcode, last, &[*byte])).unwrap();
+        if last {
+            assert_eq!(result, Some(Message::Text(Bytes::from_static(b"fragmented"))));
+        } else {
+            assert_eq!(result, None, "fragment {index} completed early");
+        }
+    }
+}
+
+#[test]
+fn case_5_4_an_empty_fragment_is_legal() {
+    // A zero length continuation carries nothing and ends nothing, and must
+    // not be mistaken for the end of the message.
+    let mut a = assembler();
+    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Continuation, false, b"")).unwrap(),
+        None
+    );
+    let message = feed(&mut a, &frame(OpCode::Continuation, true, b"b"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Text(Bytes::from_static(b"ab")));
+}
+
+#[test]
+fn case_5_8_a_close_may_interrupt_a_fragmented_message() {
+    // The close is delivered rather than held until the message completes,
+    // because the message never will.
+    let mut a = assembler();
+    a.accept(OpCode::Text, false, Bytes::from_static(b"never"))
+        .unwrap();
+    let message = feed(&mut a, &frame(OpCode::Close, true, b""))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Close(None));
+    assert!(a.is_closed());
+}
+
+#[test]
+fn a_fragmented_message_may_follow_a_complete_one() {
+    // Reassembly state has to be cleared on completion, or the second message
+    // is reported as an interleaved data frame.
+    let mut a = assembler();
+    feed(&mut a, &frame(OpCode::Text, true, b"first"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"sec")).unwrap(),
+        None
+    );
+    let message = feed(&mut a, &frame(OpCode::Continuation, true, b"ond"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Text(Bytes::from_static(b"second")));
+}
+
+// --- 6.x  the UTF-8 boundaries -------------------------------------------
+
+#[test]
+fn case_6_2_the_first_and_last_codepoint_of_each_length_pass() {
+    // The edges of each encoding width, where an off-by-one in a validator
+    // shows up.
+    for text in [
+        "\u{0}",        // one byte, first
+        "\u{7F}",       // one byte, last
+        "\u{80}",       // two bytes, first
+        "\u{7FF}",      // two bytes, last
+        "\u{800}",      // three bytes, first
+        "\u{FFFF}",     // three bytes, last
+        "\u{10000}",    // four bytes, first
+        "\u{10FFFF}",   // four bytes, last, and the highest codepoint there is
+    ] {
+        let mut a = assembler();
+        let message = feed(&mut a, &frame(OpCode::Text, true, text.as_bytes()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Text(Bytes::copy_from_slice(text.as_bytes())),
+            "refused a valid codepoint: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn case_6_6_a_truncated_sequence_at_the_end_is_refused() {
+    // Autobahn's 6.6.x walk a valid string cut short mid character. Each
+    // prefix that ends inside a sequence must fail.
+    let full = "κόσμε".as_bytes();
+    for cut in 1..full.len() {
+        if core::str::from_utf8(&full[..cut]).is_ok() {
+            continue;
+        }
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Text, true, &full[..cut])),
+            Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+            "accepted a sequence truncated at {cut}"
+        );
+    }
+}
+
+#[test]
+fn case_6_12_a_lone_continuation_byte_is_refused() {
+    // A byte in the 0x80-0xBF range cannot start a character.
+    for byte in [0x80u8, 0xA0, 0xBF] {
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Text, true, &[byte])),
+            Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+            "accepted a lone continuation byte {byte:#04x}"
+        );
+    }
+}
+
+#[test]
+fn case_6_14_an_invalid_sequence_split_across_fragments_is_still_refused() {
+    // Each half is inconclusive alone; together they are invalid. Validating
+    // per fragment would let this through.
+    let mut a = assembler();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, &[0xF0])).unwrap(),
+        None
+    );
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Continuation, true, &[0x80, 0x80, 0xAF])),
+        Err(Fault::Protocol(ProtocolError::InvalidUtf8))
+    );
+}
+
+// --- 7.x  more closing ---------------------------------------------------
+
+#[test]
+fn case_7_3_x_a_close_reason_may_be_any_valid_utf8() {
+    let mut a = assembler();
+    let mut body = 1000u16.to_be_bytes().to_vec();
+    body.extend_from_slice("κόσμε".as_bytes());
+    let message = feed(&mut a, &frame(OpCode::Close, true, &body))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        message,
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::NORMAL,
+            reason: Bytes::from_static("κόσμε".as_bytes()),
+        }))
+    );
+}
+
+#[test]
+fn case_7_7_every_code_the_registry_allows_is_accepted() {
+    // 1000-1003 and 1007-1011 are the codes an endpoint may send.
+    for code in [1000u16, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011] {
+        let mut a = assembler();
+        let body = code.to_be_bytes().to_vec();
+        let message = feed(&mut a, &frame(OpCode::Close, true, &body))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Close(Some(CloseFrame {
+                code: CloseCode(code),
+                reason: Bytes::new(),
+            })),
+            "refused close code {code}, which the registry allows"
+        );
+    }
+}
+
+#[test]
+fn a_close_frame_is_at_most_125_bytes() {
+    // It is a control frame, so the reason has 123 bytes after the code.
+    let mut a = assembler();
+    let mut body = 1000u16.to_be_bytes().to_vec();
+    body.extend_from_slice(&vec![b'x'; 124]);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Close, true, &body)),
+        Err(Fault::Frame(FrameError::InvalidControlFrame))
+    );
+}
+
+// --- 9.x  the sizes Autobahn uses for throughput -------------------------
+
+#[test]
+fn case_9_x_large_messages_survive_fragmentation() {
+    // Autobahn's 9.x send megabytes in fragments of varying size. This is the
+    // same shape smaller: what matters is that the pieces are reassembled in
+    // order and none is lost.
+    const TOTAL: usize = 256 * 1024;
+    const PIECE: usize = 4096;
+
+    let mut a = Assembler::new(Limits {
+        max_frame: 1024 * 1024,
+        max_message: 1024 * 1024,
+    });
+
+    let payload: Vec<u8> = (0..TOTAL).map(|index| (index % 251) as u8).collect();
+    let mut sent = 0usize;
+    let mut result = None;
+
+    while sent < TOTAL {
+        let end = (sent + PIECE).min(TOTAL);
+        let last = end == TOTAL;
+        let opcode = if sent == 0 { OpCode::Binary } else { OpCode::Continuation };
+        result = feed(&mut a, &frame(opcode, last, &payload[sent..end])).unwrap();
+        sent = end;
+    }
+
+    assert_eq!(
+        result,
+        Some(Message::Binary(Bytes::from(payload))),
+        "a large fragmented message did not reassemble intact"
+    );
+}
