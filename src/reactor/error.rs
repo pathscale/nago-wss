@@ -38,9 +38,7 @@ pub mod codes {
 pub fn transient_accept(error: Errno) -> bool {
     // ECONNABORTED, ECONNRESET, ECONNREFUSED. Spelled out because the values
     // differ between Linux and the BSDs and this crate has libc to ask.
-    error.0 == libc::ECONNABORTED
-        || error.0 == libc::ECONNRESET
-        || error.0 == libc::ECONNREFUSED
+    error.0 == libc::ECONNABORTED || error.0 == libc::ECONNRESET || error.0 == libc::ECONNREFUSED
 }
 
 /// The last error a syscall left in this thread's `errno`.

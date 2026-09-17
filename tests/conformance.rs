@@ -171,7 +171,10 @@ fn case_6_1_valid_utf8_passes() {
     let message = feed(&mut a, &frame(OpCode::Text, true, text.as_bytes()))
         .unwrap()
         .unwrap();
-    assert_eq!(message, Message::Text(Bytes::from_static("κόσμε".as_bytes())));
+    assert_eq!(
+        message,
+        Message::Text(Bytes::from_static("κόσμε".as_bytes()))
+    );
 }
 
 #[test]
@@ -320,10 +323,17 @@ fn case_5_2_a_message_in_many_small_fragments_reassembles() {
     for (index, byte) in text.iter().enumerate() {
         let first = index == 0;
         let last = index == text.len() - 1;
-        let opcode = if first { OpCode::Text } else { OpCode::Continuation };
+        let opcode = if first {
+            OpCode::Text
+        } else {
+            OpCode::Continuation
+        };
         let result = feed(&mut a, &frame(opcode, last, &[*byte])).unwrap();
         if last {
-            assert_eq!(result, Some(Message::Text(Bytes::from_static(b"fragmented"))));
+            assert_eq!(
+                result,
+                Some(Message::Text(Bytes::from_static(b"fragmented")))
+            );
         } else {
             assert_eq!(result, None, "fragment {index} completed early");
         }
@@ -335,7 +345,10 @@ fn case_5_4_an_empty_fragment_is_legal() {
     // A zero length continuation carries nothing and ends nothing, and must
     // not be mistaken for the end of the message.
     let mut a = assembler();
-    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(),
+        None
+    );
     assert_eq!(
         feed(&mut a, &frame(OpCode::Continuation, false, b"")).unwrap(),
         None
@@ -385,14 +398,14 @@ fn case_6_2_the_first_and_last_codepoint_of_each_length_pass() {
     // The edges of each encoding width, where an off-by-one in a validator
     // shows up.
     for text in [
-        "\u{0}",        // one byte, first
-        "\u{7F}",       // one byte, last
-        "\u{80}",       // two bytes, first
-        "\u{7FF}",      // two bytes, last
-        "\u{800}",      // three bytes, first
-        "\u{FFFF}",     // three bytes, last
-        "\u{10000}",    // four bytes, first
-        "\u{10FFFF}",   // four bytes, last, and the highest codepoint there is
+        "\u{0}",      // one byte, first
+        "\u{7F}",     // one byte, last
+        "\u{80}",     // two bytes, first
+        "\u{7FF}",    // two bytes, last
+        "\u{800}",    // three bytes, first
+        "\u{FFFF}",   // three bytes, last
+        "\u{10000}",  // four bytes, first
+        "\u{10FFFF}", // four bytes, last, and the highest codepoint there is
     ] {
         let mut a = assembler();
         let message = feed(&mut a, &frame(OpCode::Text, true, text.as_bytes()))
@@ -447,7 +460,10 @@ fn case_6_14_an_invalid_sequence_split_across_fragments_is_still_refused() {
         None
     );
     assert_eq!(
-        feed(&mut a, &frame(OpCode::Continuation, true, &[0x80, 0x80, 0xAF])),
+        feed(
+            &mut a,
+            &frame(OpCode::Continuation, true, &[0x80, 0x80, 0xAF])
+        ),
         Err(Fault::Protocol(ProtocolError::InvalidUtf8))
     );
 }
@@ -525,7 +541,11 @@ fn case_9_x_large_messages_survive_fragmentation() {
     while sent < TOTAL {
         let end = (sent + PIECE).min(TOTAL);
         let last = end == TOTAL;
-        let opcode = if sent == 0 { OpCode::Binary } else { OpCode::Continuation };
+        let opcode = if sent == 0 {
+            OpCode::Binary
+        } else {
+            OpCode::Continuation
+        };
         result = feed(&mut a, &frame(opcode, last, &payload[sent..end])).unwrap();
         sent = end;
     }
@@ -721,7 +741,12 @@ const AUTOBAHN_FRAGMENT: usize = 4096;
 fn payload_of(size: usize) -> Vec<u8> {
     // Repeating "Hello" keeps it readable in a failure and keeps every byte
     // ASCII, which text requires and binary does not care about.
-    b"Hello, world! ".iter().copied().cycle().take(size).collect()
+    b"Hello, world! "
+        .iter()
+        .copied()
+        .cycle()
+        .take(size)
+        .collect()
 }
 
 fn expect_message(kind: OpCode, payload: Vec<u8>) -> Message {
@@ -935,7 +960,10 @@ fn case_5_6_to_5_20_a_control_frame_may_sit_at_any_fragment_boundary() {
 fn case_5_6_to_5_20_several_control_frames_may_sit_at_one_boundary() {
     // Nothing limits a peer to one control frame between fragments.
     let mut a = assembler();
-    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(),
+        None
+    );
 
     for opcode in [OpCode::Ping, OpCode::Pong, OpCode::Ping] {
         let message = feed(&mut a, &frame(opcode, true, b"x")).unwrap().unwrap();
@@ -959,7 +987,10 @@ fn case_5_15_a_continuation_after_a_completed_message_is_a_protocol_error() {
     // nothing to continue. This is the failure a naive implementation misses,
     // because it never cleared the state the last FIN should have cleared.
     let mut a = assembler();
-    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(),
+        None
+    );
     assert_eq!(
         feed(&mut a, &frame(OpCode::Continuation, true, b"b")).unwrap(),
         Some(Message::Text(Bytes::from_static(b"ab")))
@@ -1052,13 +1083,14 @@ fn case_7_7_and_7_9_the_registry_decides_every_code() {
     // libraries and 4000-4999 are private. Everything else, including the
     // codes an application may observe but must never send (1005, 1006, 1015),
     // is a violation when it appears on the wire.
-    let sendable = |code: u16| {
-        matches!(code, 1000..=1003 | 1007..=1011 | 3000..=3999 | 4000..=4999)
-    };
+    let sendable =
+        |code: u16| matches!(code, 1000..=1003 | 1007..=1011 | 3000..=3999 | 4000..=4999);
 
     // Every code near a boundary, plus the ones Autobahn names explicitly.
     let interesting: Vec<u16> = (0u16..=1020)
-        .chain([1100, 2000, 2999, 3000, 3001, 3999, 4000, 4001, 4999, 5000, 65535])
+        .chain([
+            1100, 2000, 2999, 3000, 3001, 3999, 4000, 4001, 4999, 5000, 65535,
+        ])
         .collect();
 
     for code in interesting {

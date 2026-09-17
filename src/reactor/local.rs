@@ -128,9 +128,10 @@ mod tests {
         // test is about the local loop rather than about two of them.
         let peer = std::thread::spawn(move || {
             use std::io::{Read, Write};
-            let mut stream = std::net::TcpStream::connect(
-                std::net::SocketAddr::from(([127, 0, 0, 1], addr.port())),
-            )
+            let mut stream = std::net::TcpStream::connect(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                addr.port(),
+            )))
             .expect("connect");
             let mut byte = [0u8; 1];
             stream.read_exact(&mut byte).expect("read");

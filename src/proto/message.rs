@@ -208,11 +208,7 @@ impl Assembler {
         }
     }
 
-    fn accept_control(
-        &mut self,
-        opcode: OpCode,
-        payload: Bytes,
-    ) -> Result<Message, ProtocolError> {
+    fn accept_control(&mut self, opcode: OpCode, payload: Bytes) -> Result<Message, ProtocolError> {
         match opcode {
             OpCode::Ping => Ok(Message::Ping(payload)),
             OpCode::Pong => Ok(Message::Pong(payload)),
@@ -409,14 +405,19 @@ mod tests {
         let mut a = assembler();
         // Empty: no status given.
         assert_eq!(
-            a.accept(OpCode::Close, true, Bytes::new()).unwrap().unwrap(),
+            a.accept(OpCode::Close, true, Bytes::new())
+                .unwrap()
+                .unwrap(),
             Message::Close(None)
         );
 
         let mut a = assembler();
         let mut body = alloc::vec![0x03, 0xE8];
         body.extend_from_slice(b"bye");
-        let message = a.accept(OpCode::Close, true, bytes(&body)).unwrap().unwrap();
+        let message = a
+            .accept(OpCode::Close, true, bytes(&body))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             message,
             Message::Close(Some(CloseFrame {

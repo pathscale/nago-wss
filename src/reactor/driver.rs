@@ -104,7 +104,10 @@ fn make_token(index: u64, generation: u64) -> u64 {
 
 #[inline]
 fn split_token(token: u64) -> (u64, u64) {
-    (token & ((1 << GENERATION_SHIFT) - 1), token >> GENERATION_SHIFT)
+    (
+        token & ((1 << GENERATION_SHIFT) - 1),
+        token >> GENERATION_SHIFT,
+    )
 }
 
 /// A handle to the running reactor.
@@ -310,9 +313,7 @@ impl Reactor {
             // OS refusal, so it is reported as one rather than as a new error
             // kind that would exist for this single call.
             .spawn(move || run(&worker))
-            .map_err(|error| {
-                super::error::Errno(error.raw_os_error().unwrap_or(libc::EAGAIN))
-            })?;
+            .map_err(|error| super::error::Errno(error.raw_os_error().unwrap_or(libc::EAGAIN)))?;
 
         Ok(Self {
             shared,

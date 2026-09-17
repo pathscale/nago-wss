@@ -64,7 +64,10 @@ impl TcpStream {
     pub async fn connect(addr: Addr, handle: &Handle) -> Result<Self> {
         let socket = TcpSocket::connect(addr)?;
         let mut stream = Self::from_socket(socket, handle)?;
-        Connected { stream: &mut stream }.await?;
+        Connected {
+            stream: &mut stream,
+        }
+        .await?;
         Ok(stream)
     }
 
@@ -147,8 +150,7 @@ impl TcpStream {
         loop {
             // SAFETY: `buffer` is a live initialised slice, so writing up to
             // its length into it is in bounds.
-            let result =
-                unsafe { self.inner.recv(buffer.as_mut_ptr(), buffer.len()) };
+            let result = unsafe { self.inner.recv(buffer.as_mut_ptr(), buffer.len()) };
             match result {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(error) if error.would_block() => {
@@ -326,7 +328,9 @@ impl core::future::Future for WriteAllVectored<'_> {
                 // A socket that accepts nothing is not going to start; the
                 // peer has gone. Reported as a broken pipe, which is what the
                 // next write would have produced anyway.
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE)),
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE))
+                }
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -370,7 +374,9 @@ impl core::future::Future for WriteAll<'_> {
                 // A socket that accepts nothing is not going to start; the
                 // peer has gone. Reported as a broken pipe, which is what the
                 // next write would have produced anyway.
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE)),
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE))
+                }
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -423,8 +429,7 @@ impl TcpListener {
             match self.inner.accept() {
                 Ok((socket, addr)) => {
                     return Poll::Ready(
-                        TcpStream::from_socket(socket, &self.handle)
-                            .map(|stream| (stream, addr)),
+                        TcpStream::from_socket(socket, &self.handle).map(|stream| (stream, addr)),
                     );
                 }
                 Err(error) if error.would_block() => {
@@ -483,7 +488,9 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let mut stream = TcpStream::connect(addr, &client_handle).await.expect("connect");
+                let mut stream = TcpStream::connect(addr, &client_handle)
+                    .await
+                    .expect("connect");
                 stream.write_all(b"ping").await.expect("write");
                 let mut buffer = [0u8; 4];
                 stream.read(&mut buffer).await.expect("read");
@@ -521,7 +528,9 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let mut stream = TcpStream::connect(addr, &client_handle).await.expect("connect");
+                let mut stream = TcpStream::connect(addr, &client_handle)
+                    .await
+                    .expect("connect");
                 let payload = alloc::vec![0xABu8; SIZE];
                 stream.write_all(&payload).await.expect("write");
             })

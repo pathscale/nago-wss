@@ -90,7 +90,6 @@ impl From<Errno> for Error {
     }
 }
 
-
 impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -158,12 +157,7 @@ impl<S: ByteStream + StreamExt> Connection<S> {
     /// upgrade request, so those bytes have already left the socket by the
     /// time the handshake finishes. Dropping them would lose the first message
     /// of every fast client.
-    pub fn with_buffered(
-        stream: S,
-        role: Role,
-        limits: Limits,
-        buffered: BytesMut,
-    ) -> Self {
+    pub fn with_buffered(stream: S, role: Role, limits: Limits, buffered: BytesMut) -> Self {
         let mut read_buffer = BytesMut::with_capacity(READ_CHUNK);
         read_buffer.extend_from_slice(&buffered);
         Self {
@@ -221,7 +215,8 @@ impl<S: ByteStream + StreamExt> Connection<S> {
     fn parse_buffered(&mut self) -> Result<Option<Message>, Error> {
         loop {
             let limits = self.assembler.limits();
-            let decoded = Header::decode(&self.read_buffer, limits.max_frame).map_err(Error::Frame)?;
+            let decoded =
+                Header::decode(&self.read_buffer, limits.max_frame).map_err(Error::Frame)?;
             let Ok((header, header_len)) = decoded else {
                 return Ok(None);
             };
@@ -533,7 +528,10 @@ mod tests {
                 nagoya::block_on(async move {
                     for expected in ["one", "two", "three"] {
                         let message = server.read().await.expect("read").expect("a message");
-                        assert_eq!(message, Message::Text(Bytes::copy_from_slice(expected.as_bytes())));
+                        assert_eq!(
+                            message,
+                            Message::Text(Bytes::copy_from_slice(expected.as_bytes()))
+                        );
                     }
                 });
             },
@@ -651,8 +649,9 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let stream =
-                    crate::reactor::TcpStream::connect(addr, &client_handle).await.expect("connect");
+                let stream = crate::reactor::TcpStream::connect(addr, &client_handle)
+                    .await
+                    .expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());
                 client
                     .write(Message::Text(Bytes::from_static(b"secret")))
@@ -689,8 +688,9 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let stream =
-                    crate::reactor::TcpStream::connect(addr, &client_handle).await.expect("connect");
+                let stream = crate::reactor::TcpStream::connect(addr, &client_handle)
+                    .await
+                    .expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());
                 for _ in 0..4 {
                     client

@@ -156,12 +156,9 @@ mod tokio_arm {
             .expect("runtime");
 
         runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(SocketAddr::from((
-                [127, 0, 0, 1],
-                0,
-            )))
-            .await
-            .expect("bind");
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .expect("bind");
             let addr = listener.local_addr().expect("addr");
 
             let server = tokio::spawn(async move {
@@ -193,10 +190,9 @@ mod tokio_arm {
             for _ in 0..count {
                 let payload = payload.clone();
                 clients.push(tokio::spawn(async move {
-                    let (mut ws, _) =
-                        tokio_tungstenite::connect_async(format!("ws://{addr}/"))
-                            .await
-                            .expect("connect");
+                    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                        .await
+                        .expect("connect");
                     for _ in 0..PER_CONNECTION {
                         ws.send(TMessage::Binary(payload.clone().into()))
                             .await
@@ -283,10 +279,9 @@ mod sockudo_arm {
             .expect("runtime");
 
         runtime.block_on(async move {
-            let listener =
-                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .expect("bind");
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .expect("bind");
             let addr = listener.local_addr().expect("addr");
 
             let server = tokio::spawn(async move {

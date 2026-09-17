@@ -59,7 +59,6 @@ fn local_addr() -> Addr {
     Addr::localhost(0)
 }
 
-
 fn best(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
     values[0]

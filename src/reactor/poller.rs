@@ -227,8 +227,7 @@ mod sys {
             // had one direction, not a failure.
             for change in Self::changes(fd, token, interest) {
                 if let Err(error) = self.apply(&[change]) {
-                    let ignorable =
-                        change.flags & libc::EV_DELETE != 0 && error.0 == libc::ENOENT;
+                    let ignorable = change.flags & libc::EV_DELETE != 0 && error.0 == libc::ENOENT;
                     if !ignorable {
                         return Err(error);
                     }
@@ -601,7 +600,10 @@ mod tests {
         write_byte(&b);
         events.clear();
         poller.wait(&mut events, Some(500_000_000)).expect("wait");
-        assert!(events.iter().any(|event| event.readable), "lost readability");
+        assert!(
+            events.iter().any(|event| event.readable),
+            "lost readability"
+        );
     }
 
     #[test]

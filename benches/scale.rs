@@ -66,7 +66,8 @@ fn resident_bytes() -> u64 {
             policy: 0,
             suspend_count: 0,
         };
-        let mut count = (core::mem::size_of::<TaskBasicInfo>() / core::mem::size_of::<i32>()) as u32;
+        let mut count =
+            (core::mem::size_of::<TaskBasicInfo>() / core::mem::size_of::<i32>()) as u32;
         // SAFETY: the struct and count match what TASK_BASIC_INFO_64 writes.
         // `mach_task_self` is deprecated in favour of the `mach2` crate, which
         // is a dependency this benchmark does not need for one call that works.
@@ -219,10 +220,9 @@ mod tokio_arm {
             .ok()?;
 
         runtime.block_on(async move {
-            let listener =
-                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .ok()?;
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .ok()?;
             let addr = listener.local_addr().ok()?;
             let baseline = resident_bytes();
 
@@ -249,8 +249,7 @@ mod tokio_arm {
             let establish_start = Instant::now();
             let mut conns = Vec::with_capacity(count);
             for _ in 0..count {
-                let Ok((ws, _)) =
-                    tokio_tungstenite::connect_async(format!("ws://{addr}/")).await
+                let Ok((ws, _)) = tokio_tungstenite::connect_async(format!("ws://{addr}/")).await
                 else {
                     break;
                 };
@@ -261,8 +260,7 @@ mod tokio_arm {
                 return None;
             }
 
-            let bytes_per_connection =
-                resident_bytes().saturating_sub(baseline) / count as u64;
+            let bytes_per_connection = resident_bytes().saturating_sub(baseline) / count as u64;
 
             let payload = vec![0x5Au8; PAYLOAD];
             let broadcast_start = Instant::now();
@@ -352,10 +350,9 @@ mod sockudo_arm {
             .ok()?;
 
         runtime.block_on(async move {
-            let listener =
-                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .ok()?;
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .ok()?;
             let addr = listener.local_addr().ok()?;
             let baseline = resident_bytes();
 
@@ -397,8 +394,7 @@ mod sockudo_arm {
                 return None;
             }
 
-            let bytes_per_connection =
-                resident_bytes().saturating_sub(baseline) / count as u64;
+            let bytes_per_connection = resident_bytes().saturating_sub(baseline) / count as u64;
 
             let payload = bytes::Bytes::from(vec![0x5Au8; PAYLOAD]);
             let broadcast_start = Instant::now();

@@ -10,7 +10,7 @@ use bytes::BytesMut;
 
 use crate::conn::{Connection, Error, Role};
 use crate::proto::handshake::{
-    build_request, build_rejection, build_response, check_response, head_end, new_key,
+    build_rejection, build_request, build_response, check_response, head_end, new_key,
     parse_request, Request, UpgradeError, DEFAULT_MAX_HEAD,
 };
 use crate::proto::message::Limits;
@@ -239,9 +239,7 @@ mod tests {
             .expect("connect");
 
             let key = crate::proto::handshake::new_key([4u8; 16]);
-            let mut wire = crate::proto::handshake::build_request(
-                "/", "localhost", &key, &[], &[],
-            );
+            let mut wire = crate::proto::handshake::build_request("/", "localhost", &key, &[], &[]);
             // A masked text frame carrying "hi", appended to the request so
             // both land in one write.
             wire.extend_from_slice(&[0x81, 0x82, 0, 0, 0, 0, b'h', b'i']);

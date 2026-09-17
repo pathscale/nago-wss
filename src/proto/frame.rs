@@ -57,7 +57,10 @@ impl Header {
     /// caller can advance past it to the payload. `max_payload` rejects an
     /// oversized frame from its length field alone, before any of the payload
     /// is read or buffered.
-    pub fn decode(input: &[u8], max_payload: u64) -> Result<Result<(Self, usize), Incomplete>, FrameError> {
+    pub fn decode(
+        input: &[u8],
+        max_payload: u64,
+    ) -> Result<Result<(Self, usize), Incomplete>, FrameError> {
         if input.len() < 2 {
             return Ok(Err(Incomplete));
         }
@@ -72,8 +75,8 @@ impl Header {
         }
 
         let fin = first & 0x80 != 0;
-        let opcode = OpCode::from_bits(first & 0x0F)
-            .ok_or(FrameError::ReservedOpCode(first & 0x0F))?;
+        let opcode =
+            OpCode::from_bits(first & 0x0F).ok_or(FrameError::ReservedOpCode(first & 0x0F))?;
 
         let masked = second & 0x80 != 0;
         let short_len = second & 0x7F;

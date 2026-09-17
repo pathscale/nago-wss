@@ -371,11 +371,11 @@ mod tests {
     #[test]
     fn refuses_urls_it_would_have_to_guess_at() {
         for input in [
-            "example.com/chat",             // no scheme
-            "http://example.com/chat",      // not a websocket scheme
-            "ws:///chat",                   // no host
-            "ws://example.com:noport/",     // port is not a number
-            "ws://user:pass@example.com/",  // credentials
+            "example.com/chat",            // no scheme
+            "http://example.com/chat",     // not a websocket scheme
+            "ws:///chat",                  // no host
+            "ws://example.com:noport/",    // port is not a number
+            "ws://user:pass@example.com/", // credentials
         ] {
             assert!(
                 Url::parse(input).is_err(),
@@ -409,16 +409,15 @@ mod tests {
         // WebSocket upgrade, a message each way. Every layer this crate has.
         use crate::proto::message::Message;
         use crate::reactor::{Reactor, TcpListener};
-        use alloc::sync::Arc;
-        use bytes::Bytes;
         use crate::tls::rustls;
         use crate::tls::rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        use alloc::sync::Arc;
+        use bytes::Bytes;
 
-        let issued = rcgen::generate_simple_self_signed(["localhost".to_string()])
-            .expect("certificate");
+        let issued =
+            rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
         let certificate = CertificateDer::from(issued.cert.der().to_vec());
-        let key =
-            PrivateKeyDer::try_from(issued.signing_key.serialize_der()).expect("key");
+        let key = PrivateKeyDer::try_from(issued.signing_key.serialize_der()).expect("key");
 
         let server_config = Arc::new(
             rustls::ServerConfig::builder()
@@ -442,8 +441,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let (stream, _) = listener.accept().await.expect("accept");
-                let session =
-                    rustls::ServerConnection::new(server_config).expect("session");
+                let session = rustls::ServerConnection::new(server_config).expect("session");
                 let mut tls = crate::tls::TlsStream::server(stream, session);
                 tls.handshake().await.expect("tls handshake");
 
@@ -460,8 +458,7 @@ mod tests {
             });
         });
 
-        let url = Url::parse(&alloc::format!("wss://localhost:{port}/chat"))
-            .expect("url");
+        let url = Url::parse(&alloc::format!("wss://localhost:{port}/chat")).expect("url");
         nagoya::block_on(async {
             let options = ClientOptions {
                 protocols: &["mcp"],
@@ -508,9 +505,6 @@ mod tests {
         let addrs = resolve("localhost", 80).expect("resolve");
         let v4 = addrs.iter().any(|addr| matches!(addr, Addr::V4(..)));
         let v6 = addrs.iter().any(|addr| matches!(addr, Addr::V6(..)));
-        assert!(
-            v4 || v6,
-            "localhost resolved to neither family: {addrs:?}"
-        );
+        assert!(v4 || v6, "localhost resolved to neither family: {addrs:?}");
     }
 }

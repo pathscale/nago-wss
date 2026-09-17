@@ -83,7 +83,6 @@ fn local_addr() -> Addr {
     Addr::localhost(0)
 }
 
-
 /// What a set of samples for one arm looks like.
 #[derive(Debug, Clone, Copy)]
 struct Stats {

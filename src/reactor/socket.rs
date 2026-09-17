@@ -288,9 +288,7 @@ impl TcpSocket {
         let len = addr.write_to(&mut storage);
 
         // SAFETY: `storage` holds a valid address of `len` bytes.
-        let result = unsafe {
-            libc::connect(fd.raw(), core::ptr::addr_of!(storage).cast(), len)
-        };
+        let result = unsafe { libc::connect(fd.raw(), core::ptr::addr_of!(storage).cast(), len) };
         if result < 0 {
             let error = crate::reactor::error::last();
             // Expected: the handshake is in flight.

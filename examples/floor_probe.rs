@@ -257,8 +257,7 @@ fn blocking_recv_shape() -> f64 {
 /// the protocol path, and the socket buffer machinery around it.
 fn unix_socket_shape() -> f64 {
     let mut fds = [0i32; 2];
-    let result =
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
     assert_eq!(result, 0, "socketpair failed");
     let (client_fd, server_fd) = (fds[0], fds[1]);
 
@@ -458,7 +457,10 @@ fn kevent_with_event_ready() -> f64 {
     writer.write_all(b"x").expect("write");
 
     let mut events: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
-    let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let timeout = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
 
     let start = Instant::now();
     for _ in 0..CALLS {
@@ -582,9 +584,7 @@ fn main() {
     let _ = readiness_syscalls();
 
     let raw = (0..3).map(|_| raw_libc_syscalls()).fold(f64::MAX, f64::min);
-    let blocking = (0..3)
-        .map(|_| blocking_syscalls())
-        .fold(f64::MAX, f64::min);
+    let blocking = (0..3).map(|_| blocking_syscalls()).fold(f64::MAX, f64::min);
     let readiness = (0..3)
         .map(|_| readiness_syscalls())
         .fold(f64::MAX, f64::min);
@@ -594,8 +594,14 @@ fn main() {
     println!("  1. via std::net TcpStream      {blocking:>8.2}");
     println!("     std's own overhead          {:>8.2}", blocking - raw);
     println!("  2. non-blocking + kqueue wait  {readiness:>8.2}");
-    println!("     readiness costs             {:>8.2}", readiness - blocking);
-    println!("  3. full reactor (floor bench)  {:>8.2}  (measured separately)", 18.2);
+    println!(
+        "     readiness costs             {:>8.2}",
+        readiness - blocking
+    );
+    println!(
+        "  3. full reactor (floor bench)  {:>8.2}  (measured separately)",
+        18.2
+    );
     println!("     this crate's machinery      {:>8.2}", 18.2 - readiness);
     let syscall = one_syscall();
     let blocking_shape = (0..3)
@@ -627,7 +633,9 @@ fn main() {
     );
 
     let nago_wake = (0..3).map(|_| wake_latency()).fold(f64::MAX, f64::min);
-    let tokio_wake = (0..3).map(|_| tokio_wake_latency()).fold(f64::MAX, f64::min);
+    let tokio_wake = (0..3)
+        .map(|_| tokio_wake_latency())
+        .fold(f64::MAX, f64::min);
     println!("  wake and repoll, no I/O at all:");
     println!("    nagoya block_on  {nago_wake:>8.4} us/hop");
     println!("    tokio            {tokio_wake:>8.4} us/hop\n");
@@ -644,8 +652,14 @@ fn main() {
     println!();
 
     println!("  what the reactor does per round trip:");
-    println!("    kevent, event ready  {:>8.3} us", kevent_with_event_ready());
-    println!("    mutex lock/unlock    {:>8.4} us  (x2 per wakeup)", mutex_pair());
+    println!(
+        "    kevent, event ready  {:>8.3} us",
+        kevent_with_event_ready()
+    );
+    println!(
+        "    mutex lock/unlock    {:>8.4} us  (x2 per wakeup)",
+        mutex_pair()
+    );
     println!("    nagoya clock read    {:>8.4} us", clock_read());
     println!();
 
