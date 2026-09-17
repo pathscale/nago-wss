@@ -636,3 +636,156 @@ fn case_9_x_large_messages_survive_fragmentation() {
         "a large fragmented message did not reassemble intact"
     );
 }
+
+// --- 6.x in bulk ---------------------------------------------------------
+//
+// Section 6 is the largest part of Autobahn, around a hundred and forty five
+// cases, and almost all of it is one question asked of many byte sequences:
+// is this valid UTF-8, and does the connection do the right thing either way.
+//
+// Hand writing a hundred and forty five of those would be transcription. What
+// follows generates the same space from the rules that define it, which
+// covers more than the published list and states why each sequence is in it.
+
+/// Every way a UTF-8 sequence can be malformed, and one example of each.
+///
+/// Taken from the same table Autobahn's 6.3 through 6.21 are built from:
+/// Markus Kuhn's stress test, which is where that section comes from.
+const MALFORMED: &[(&str, &[u8])] = &[
+    ("lone continuation byte", &[0x80]),
+    ("lone continuation byte, high", &[0xBF]),
+    ("two continuation bytes", &[0x80, 0xBF]),
+    ("lone start, two byte", &[0xC2]),
+    ("lone start, three byte", &[0xE0]),
+    ("lone start, four byte", &[0xF0]),
+    ("truncated two byte", &[0xC2, 0x41]),
+    ("truncated three byte", &[0xE0, 0xA0, 0x41]),
+    ("truncated four byte", &[0xF0, 0x90, 0x80, 0x41]),
+    ("overlong solidus, two byte", &[0xC0, 0xAF]),
+    ("overlong solidus, three byte", &[0xE0, 0x80, 0xAF]),
+    ("overlong solidus, four byte", &[0xF0, 0x80, 0x80, 0xAF]),
+    ("overlong nul, two byte", &[0xC0, 0x80]),
+    ("overlong nul, three byte", &[0xE0, 0x80, 0x80]),
+    ("overlong nul, four byte", &[0xF0, 0x80, 0x80, 0x80]),
+    ("maximum overlong, two byte", &[0xC1, 0xBF]),
+    ("maximum overlong, three byte", &[0xE0, 0x9F, 0xBF]),
+    ("maximum overlong, four byte", &[0xF0, 0x8F, 0xBF, 0xBF]),
+    ("surrogate D800", &[0xED, 0xA0, 0x80]),
+    ("surrogate DBFF", &[0xED, 0xAF, 0xBF]),
+    ("surrogate DC00", &[0xED, 0xB0, 0x80]),
+    ("surrogate DFFF", &[0xED, 0xBF, 0xBF]),
+    ("paired surrogates", &[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80]),
+    ("beyond U+10FFFF", &[0xF4, 0x90, 0x80, 0x80]),
+    ("five byte sequence", &[0xF8, 0x88, 0x80, 0x80, 0x80]),
+    ("six byte sequence", &[0xFC, 0x84, 0x80, 0x80, 0x80, 0x80]),
+    ("0xFE is never valid", &[0xFE]),
+    ("0xFF is never valid", &[0xFF]),
+    ("0xFE 0xFF", &[0xFE, 0xFF]),
+];
+
+#[test]
+fn case_6_3_to_6_21_every_malformed_sequence_is_refused() {
+    for (name, payload) in MALFORMED {
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Text, true, payload)),
+            Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+            "accepted {name}: {payload:02x?}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_sequence_is_refused_wherever_it_sits() {
+    // Autobahn places its bad sequences at the start, the middle and the end
+    // of a valid string, because a validator that scans in blocks can miss
+    // one that straddles a boundary.
+    let filler = "The quick brown fox jumps over the lazy dog. ".repeat(8);
+    for (name, bad) in MALFORMED {
+        for position in [0, filler.len() / 2, filler.len()] {
+            let mut payload = filler.as_bytes()[..position].to_vec();
+            payload.extend_from_slice(bad);
+            payload.extend_from_slice(&filler.as_bytes()[position..]);
+
+            let mut a = assembler();
+            assert_eq!(
+                feed(&mut a, &frame(OpCode::Text, true, &payload)),
+                Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+                "accepted {name} at offset {position}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_malformed_sequence_is_refused_in_a_close_reason() {
+    // 7.5.1 is this question for close frames, which take the same path.
+    for (name, bad) in MALFORMED {
+        // A close frame is a control frame: code plus 123 bytes at most.
+        if bad.len() > 123 {
+            continue;
+        }
+        let mut body = 1000u16.to_be_bytes().to_vec();
+        body.extend_from_slice(bad);
+
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Close, true, &body)),
+            Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+            "accepted {name} as a close reason"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_sequence_is_refused_across_a_fragment_boundary() {
+    // The case per fragment validation would let through: each half alone is
+    // merely incomplete, and only the join is invalid.
+    for (name, bad) in MALFORMED {
+        if bad.len() < 2 {
+            continue;
+        }
+        let split = bad.len() / 2;
+
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Text, false, &bad[..split])).unwrap(),
+            None,
+            "{name}: a partial sequence completed a message early"
+        );
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Continuation, true, &bad[split..])),
+            Err(Fault::Protocol(ProtocolError::InvalidUtf8)),
+            "accepted {name} split across fragments"
+        );
+    }
+}
+
+#[test]
+fn every_valid_codepoint_class_passes_where_the_bad_ones_fail() {
+    // The other half of section 6: the sequences that must be accepted, so
+    // that a validator which refuses everything cannot pass the tests above.
+    let valid: &[(&str, &str)] = &[
+        ("ascii", "hello world"),
+        ("two byte", "\u{80}\u{7FF}"),
+        ("three byte", "\u{800}\u{FFFF}"),
+        ("four byte", "\u{10000}\u{10FFFF}"),
+        ("greek", "κόσμε"),
+        ("nul", "\u{0}"),
+        ("replacement character", "\u{FFFD}"),
+        ("just below a surrogate", "\u{D7FF}"),
+        ("just above a surrogate", "\u{E000}"),
+        ("non-characters are valid utf8", "\u{FFFE}\u{FFFF}"),
+    ];
+    for (name, text) in valid {
+        let mut a = assembler();
+        let message = feed(&mut a, &frame(OpCode::Text, true, text.as_bytes()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Text(Bytes::copy_from_slice(text.as_bytes())),
+            "refused {name}, which is valid"
+        );
+    }
+}
