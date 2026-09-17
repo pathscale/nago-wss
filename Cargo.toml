@@ -1,0 +1,22 @@
+[package]
+name = "nago-wss"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "RFC 6455 WebSockets without tokio: a sans-io protocol core plus its own reactor"
+repository = "https://github.com/pathscale/nago-wss"
+keywords = ["websocket", "no-std", "sans-io", "rfc6455", "async"]
+categories = ["network-programming", "web-programming::websocket", "no-std"]
+
+[features]
+# The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
+default = ["std"]
+std = []
+
+[dependencies]
+# Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
+# so a frame payload crosses the seam without a copy or a reallocation.
+bytes = { version = "1.7", default-features = false }
+
+[dev-dependencies]
