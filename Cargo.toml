@@ -89,9 +89,16 @@ harness = false
 name = "scale"
 harness = false
 
+# Requires the feature rather than tolerating its absence. Without it the
+# UTF-8 columns silently measure `core::str::from_utf8`, which is the same
+# code as the tungstenite control column, so this crate appears to lose to
+# sockudo-ws by three times when what is actually running is the fallback the
+# feature exists to replace. A benchmark that measures the wrong thing quietly
+# is worse than one that does not build.
 [[bench]]
 name = "micro"
 harness = false
+required-features = ["simd-utf8"]
 
 # A diagnostic rather than a benchmark: it attributes the floor to its layers.
 [[example]]

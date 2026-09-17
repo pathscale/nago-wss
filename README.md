@@ -56,9 +56,14 @@ value. It is not a general-purpose hash and should not be used as one.
 
 ## Numbers
 
-Protocol core, no sockets, on an M-series laptop. Rates are operations per
-second; the three arms are this crate, tungstenite (what the fleet runs today)
-and sockudo-ws, each through its own public entry point.
+Re-measured 2026-09-17 on an idle 16 core M-series laptop, after the reactor
+moved to nagoya. Rates are operations per second; the three arms are this
+crate, tungstenite (what the fleet runs today) and sockudo-ws, each through its
+own public entry point.
+
+Run them with `cargo bench --features simd-utf8`. The earlier table here was
+taken on a machine under heavy load and every figure in it was low by roughly
+four times, which is why these are larger rather than better.
 
 ### Masking
 
@@ -66,28 +71,36 @@ Every byte a client sends and every byte a server receives.
 
 | payload | nago-wss | tungstenite | sockudo-ws |
 |---|---|---|---|
-| 64 B | **73.8M/s** (4.72 GB/s) | 32.8M/s (2.10) | 19.0M/s (1.22) |
-| 1 KB | **8.8M/s** (8.99) | 8.4M/s (8.64) | 4.4M/s (4.56) |
-| 16 KB | **905K/s** (14.82) | 496K/s (8.12) | 188K/s (3.08) |
-| 256 KB | **53.7K/s** (14.07) | 35.9K/s (9.40) | 10.7K/s (2.81) |
+| 64 B | 18.69 GB/s | 19.41 | **23.09** |
+| 1 KB | **86.14** | 72.23 | 54.35 |
+| 16 KB | **120.43** | 119.85 | 60.48 |
+| 256 KB | **69.75** | 68.98 | 62.91 |
 
-A 64-bit word loop, which beats tungstenite's 32-bit one and beats
-sockudo-ws's SIMD. No unsafe.
+A 64-bit word loop, which beats tungstenite's 32-bit one at every size and
+beats sockudo-ws's SIMD everywhere but 64 bytes, where per-call overhead is
+most of the measurement. No unsafe.
 
 ### UTF-8 validation
 
-Text frames only; binary skips it. With `simd-utf8` on.
+Text frames only; binary skips it. Requires `--features simd-utf8`, and the
+benchmark refuses to build without it: the fallback is the standard library's
+byte loop, which is the same code as the tungstenite column, and measuring it
+makes this crate look three times slower than it is.
 
 | payload | nago-wss | tungstenite | sockudo-ws |
 |---|---|---|---|
-| ascii 1 KB | **17.46 GB/s** | 9.07 | 4.01 |
-| ascii 16 KB | 23.37 | 2.06 | **28.85** |
-| mixed 1 KB | 0.88 | 0.22 | **1.58** |
-| mixed 16 KB | 1.33 | 0.26 | **2.23** |
+| ascii 64 B | **40.21 GB/s** | 20.65 | 36.89 |
+| ascii 1 KB | **168.04** | 54.19 | 162.07 |
+| ascii 16 KB | 169.60 | 56.81 | **170.16** |
+| ascii 256 KB | **109.26** | 55.18 | 108.79 |
+| mixed 64 B | **12.68** | 2.42 | 12.68 |
+| mixed 1 KB | **13.49** | 2.96 | 13.29 |
+| mixed 16 KB | 13.57 | 2.69 | **13.71** |
+| mixed 256 KB | **13.75** | 2.51 | 13.66 |
 
-Without the feature this is the standard library's byte loop and sockudo-ws is
-eight times faster. With it, that gap closes to between 1.1 and 1.8, and
-tungstenite is two to five times behind.
+Level with sockudo-ws's hand written SIMD, within one percent either way, and
+three to five times ahead of tungstenite. Ours is `simdutf8`, a crate that
+contains unsafe but is not this crate's unsafe, which is why it is a feature.
 
 ### A whole message
 
@@ -95,9 +108,9 @@ Encode, mask, decode, unmask, reassemble.
 
 | payload | rate |
 |---|---|
-| 64 B | 7.7M msg/s |
-| 1 KB | 1.6M msg/s |
-| 16 KB | 242K msg/s |
+| 64 B | 36.1M msg/s |
+| 1 KB | 12.8M msg/s |
+| 16 KB | 1.38M msg/s |
 
 ### Ten thousand connections
 
@@ -105,18 +118,39 @@ Both ends in one process, so every arm is handicapped the same way.
 
 | | establish | broadcast | memory |
 |---|---|---|---|
-| nago-wss | **0.89 s** | **194 ms** | 42 KB/conn |
-| tokio-tungstenite | 2.11 s | 475 ms | 151 KB/conn |
-| sockudo-ws | 4.18 s | 263 ms | **35 KB/conn** |
+| nago-wss | **0.41 s** | **97.6 ms** | 42.6 KB/conn |
+| tokio-tungstenite | 0.74 s | 316.3 ms | 151.5 KB/conn |
+| sockudo-ws | 1.09 s | 280.2 ms | **35.4 KB/conn** |
+
+Broadcast is 3.2x tokio-tungstenite's and establish 1.8x, on 3.6x less memory.
+
+### Concurrency
+
+Aggregate throughput, 256 byte echo, messages per second.
+
+| connections | nago-wss | tokio-tungstenite | sockudo-ws |
+|---|---|---|---|
+| 1 | **18,749** | 16,589 | 16,195 |
+| 8 | **54,629** | 51,961 | 50,316 |
+| 32 | 76,508 | 75,126 | **89,325** |
 
 ### Where this loses
 
-A single connection doing one round trip at a time on loopback: about 17.8us
-against tokio's 14.7. Most of that is neither crate's, a unix socketpair does
-the same handoff in 4.9us against loopback TCP's 12.1, but the remaining
-difference is real and not yet explained.
+A single connection doing one round trip at a time on loopback: 20.2us against
+tokio-tungstenite's 17.0 and sockudo-ws's 15.3. Streaming small payloads is
+worse, 1.54us against tokio's 0.59 at 64 bytes.
 
-Run them with `cargo bench --bench micro`, `--bench scale`, `--bench floor`.
+Most of that is neither crate's. The transport floor with no WebSocket in it at
+all is 23.99us threaded and 21.88us on the single thread arrangement, against
+tokio's 18.73, and a unix socketpair does the same handoff in 4.9us against
+loopback TCP's 12.1. The remaining difference is real, about three microseconds,
+and is not yet explained: syscall count, kevent cost, the mutex pair, the clock
+read, the thread handoff and copying have each been measured and eliminated.
+`benches/floor.rs` records what has been ruled out so it is not retested.
+
+Run them with `cargo bench --features simd-utf8`, or one at a time with
+`--bench micro`, `--bench echo`, `--bench concurrent`, `--bench scale`,
+`--bench floor`.
 
 ## Status
 

@@ -210,17 +210,20 @@ fn main() {
     println!("  nago-wss threaded  {:>8.2} us/op", each(nago));
     println!("  nago-wss local     {:>8.2} us/op", each(nago_local));
     println!("  tokio              {:>8.2} us/op", each(tokio));
-    // The echo benchmark's round trip numbers, for subtraction. Hardcoded
-    // rather than measured here because running the WebSocket arms again just
-    // to subtract them would double the runtime of a benchmark whose whole
-    // point is to be quick.
-    const WS_NAGO_US: f64 = 21.0;
-    const WS_TOKIO_US: f64 = 18.5;
+    // What the framing costs is deliberately not computed here.
+    //
+    // It used to be, by subtracting these numbers from two constants copied
+    // out of an echo run. Both benchmarks then drifted, and subtracting a
+    // stale constant from a live measurement produced a framing cost of minus
+    // 2.8us: the protocol measured faster than the transport underneath it,
+    // which cannot happen. A number that can go negative was never measuring
+    // what it claimed.
+    //
+    // Run `cargo bench --bench echo` and subtract by hand if the difference is
+    // wanted. Both arms have to come from the same machine on the same day for
+    // the subtraction to mean anything, which is the part the constants hid.
     println!(
-        "\n  against ~{WS_NAGO_US:.1}us and ~{WS_TOKIO_US:.1}us for the same round trip\n  \
-         with WebSocket framing, so framing is about {:.1}us and {:.1}us of it.\n\
-         \n  Most of a loopback round trip is the transport, not the protocol.\n",
-        WS_NAGO_US - each(nago),
-        WS_TOKIO_US - each(tokio)
+        "\n  Most of a loopback round trip is the transport, not the protocol:\n  \
+         compare these against the round trip figures from `--bench echo`.\n"
     );
 }
