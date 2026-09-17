@@ -16,8 +16,7 @@
 //!
 //!     cargo run --release --example autobahn_server
 //!
-//! then point the suite at `ws://127.0.0.1:9001`. `autobahn/README.md` has the
-//! Docker line.
+//! then point a WebSocket conformance suite at `ws://127.0.0.1:9001`.
 
 use bytes::Bytes;
 use nago_wss::conn::Error;

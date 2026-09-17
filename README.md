@@ -226,23 +226,22 @@ The connection, over whatever `nagoya::reactor` or a TLS session provides:
   reading into a `BytesMut`'s uninitialised tail, and writing a frame header and
   its payload without joining them
 
-Conformance: **the Autobahn suite passes, 301 of 301 cases**, against the echo
-server in `examples/autobahn_server.rs`. It is run locally rather than in CI,
-because it wants a container and a wire protocol test harness has no business
-holding a build runner. `autobahn/README.md` has the command.
+Conformance is 58 tests under `cargo test`, with no suite, no server and no
+sockets, written straight against the protocol core.
 
-Sections 12 and 13 are excluded and nothing else is. They are
+The Autobahn suite is not part of this repo. It ships only as a container, and
+nothing here requires one: `examples/autobahn_server.rs` remains, so anyone who
+wants to point that suite at this crate can, but it is not a dependency of the
+build, the tests or CI, and no result from it is claimed here.
+
+Sections 12 and 13 would be excluded in any case. They are
 `permessage-deflate`, which this crate does not implement: no extension is
 negotiated, so a peer that sets a reserved bit is speaking a protocol that was
 never agreed to and the frame is refused. That is the right answer to those
-cases, but the suite scores them against a compressor.
-
-Alongside it, 58 tests run under `cargo test` with no suite, no server and no
-sockets, written straight against the protocol core. They exist because a
-failure there names a rule and points at a line, where Autobahn points at a
-case number in an HTML report. Most are generated from the rule rather than
-transcribed from the case list, so they cover more sequences than Autobahn
-publishes: section 6 alone is twenty nine malformed UTF-8 sequences in four
+cases, but the suite scores them against a compressor. They exist because a
+failure there names a rule and points at a line, rather than a case number in
+an HTML report. Most are generated from the rule rather than transcribed from
+a case list, so they cover more sequences than the published suite does: section 6 alone is twenty nine malformed UTF-8 sequences in four
 contexts, about three hundred and eighty assertions, against the hundred and
 forty five cases the suite ships.
 
