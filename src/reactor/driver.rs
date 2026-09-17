@@ -8,14 +8,21 @@
 //! run tasks, which is nagoya's job, and does not touch sockets, which is the
 //! task's job. It only converts kernel readiness into `Waker::wake`.
 //!
-//! # Why the timers share this loop
+//! # Timers, without polling them
 //!
-//! `nagoya::time` needs someone to call [`nagoya::poll_timers`], and that call
-//! returns when the next timer is due. That is exactly the timeout the poller
-//! needs for its wait. Running both in one thread means a sleeping reactor
-//! wakes precisely when the next timer fires, with no separate timer thread and
-//! no polling interval to tune. A timer armed while the reactor is already
-//! blocked is handled by [`Poller::wake`].
+//! Nothing here runs on a tick. The thread blocks in `kevent`/`epoll_wait`,
+//! which is an interrupt-driven kernel wait, and is woken by a descriptor
+//! changing state, by an expiring deadline, or by an explicit
+//! [`Poller::wake`]. There is no retry interval and no spin.
+//!
+//! Timers are event driven in the same sense. The wheel is *not* consulted on
+//! every wakeup: a socket delivering ten thousand events a second would
+//! otherwise take the timer heap's lock ten thousand times to be told, almost
+//! always, that nothing is due. Instead the next deadline is cached in
+//! [`Shared::next_deadline`], and the wheel is touched only when that deadline
+//! has actually arrived or when [`Handle::timer_armed`] reports a new one.
+//! Socket traffic and timer work are then independent: neither makes the other
+//! do anything.
 //!
 //! # Registration lifetime
 //!
@@ -50,7 +57,17 @@ struct Shared {
     slots: Mutex<HashMap<u64, Slot>>,
     next_index: AtomicU64,
     running: AtomicBool,
+    /// When the earliest known timer is due, in nagoya's clock, or
+    /// [`NO_DEADLINE`] when none is armed.
+    ///
+    /// This is what makes timer servicing event driven rather than polled: the
+    /// loop compares against it instead of asking the timer wheel.
+    next_deadline: AtomicU64,
 }
+
+/// Sentinel for "no timer armed". A real deadline is a nanosecond clock
+/// reading, which does not reach `u64::MAX` for any running system.
+const NO_DEADLINE: u64 = u64::MAX;
 
 /// Split a token into its slot index and generation.
 ///
@@ -110,10 +127,39 @@ impl Handle {
     }
 
     /// Wake the reactor thread if it is blocked.
-    ///
-    /// Needed after arming a timer, since the thread may already be waiting on
-    /// a deadline further out than the new one.
     pub fn wake(&self) -> io::Result<()> {
+        self.shared.poller.wake()
+    }
+
+    /// Tell the reactor a timer was armed for `deadline`.
+    ///
+    /// This is the event that makes timer servicing reactive. Without it the
+    /// reactor would have to ask the wheel on every pass just in case, which is
+    /// the polling this design avoids. Calling it with a deadline further out
+    /// than the one already cached is cheap and does not wake the thread.
+    pub fn timer_armed(&self, deadline: u64) -> io::Result<()> {
+        // Lower the cached deadline if this one is sooner. A racing update that
+        // lowers it further simply wins; the loser's deadline is later and will
+        // still be served when the earlier one fires.
+        let mut current = self.shared.next_deadline.load(Ordering::Acquire);
+        loop {
+            if current <= deadline {
+                // Something sooner is already pending, so the thread will wake
+                // in time to see this one. Nothing to do.
+                return Ok(());
+            }
+            match self.shared.next_deadline.compare_exchange_weak(
+                current,
+                deadline,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+        // The thread may be blocked on a later deadline: interrupt it so it
+        // recomputes its wait against the new one.
         self.shared.poller.wake()
     }
 }
@@ -187,6 +233,7 @@ impl Reactor {
             slots: Mutex::new(HashMap::new()),
             next_index: AtomicU64::new(0),
             running: AtomicBool::new(true),
+            next_deadline: AtomicU64::new(NO_DEADLINE),
         });
 
         let worker = Arc::clone(&shared);
@@ -229,15 +276,14 @@ impl Drop for Reactor {
 }
 
 /// The reactor loop.
+///
+/// One blocking wait per pass, woken by a descriptor, a deadline or an explicit
+/// wake. Nothing polls and nothing spins.
 fn run(shared: &Arc<Shared>) {
     let mut events: Vec<Event> = Vec::with_capacity(64);
 
     while shared.running.load(Ordering::Acquire) {
-        // Drive timers first and learn when the next one is due. That deadline
-        // becomes the wait timeout, so the thread sleeps exactly as long as it
-        // can rather than on a fixed tick.
-        let now = nagoya::now_ns();
-        let timeout = nagoya::poll_timers(now).map(|deadline| deadline.saturating_sub(now));
+        let timeout = service_timers(shared);
 
         events.clear();
         if shared.poller.wait(&mut events, timeout).is_err() {
@@ -248,6 +294,30 @@ fn run(shared: &Arc<Shared>) {
 
         dispatch(shared, &events);
     }
+}
+
+/// Fire any due timers and return how long the next wait may block.
+///
+/// The timer wheel is only consulted when the cached deadline says something is
+/// actually due, so a connection delivering a flood of readiness events does
+/// not drag the timer lock along with it. `None` means block until an event
+/// arrives: there is no deadline to wake for.
+fn service_timers(shared: &Arc<Shared>) -> Option<u64> {
+    let deadline = shared.next_deadline.load(Ordering::Acquire);
+    let now = nagoya::now_ns();
+
+    // Not due yet: wait exactly until it is, and do not touch the wheel.
+    if deadline != NO_DEADLINE && deadline > now {
+        return Some(deadline - now);
+    }
+
+    // Either a deadline has arrived or a timer was armed and the cache was
+    // invalidated. Both mean the wheel has work to report.
+    let next = nagoya::poll_timers(now);
+    shared
+        .next_deadline
+        .store(next.unwrap_or(NO_DEADLINE), Ordering::Release);
+    next.map(|deadline| deadline.saturating_sub(now))
 }
 
 /// Wake the tasks named by `events`.
@@ -374,6 +444,76 @@ mod tests {
         assert_ne!(
             slot.generation, generation,
             "a reused slot must not match the old generation"
+        );
+    }
+
+    #[test]
+    fn an_armed_timer_lowers_the_cached_deadline_and_a_later_one_does_not() {
+        // The cache is what keeps timer servicing off the socket path, so its
+        // update rule is worth pinning down: sooner replaces, later is ignored.
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+
+        let now = nagoya::now_ns();
+        let soon = now + 60_000_000_000;
+        let later = soon + 60_000_000_000;
+
+        handle.timer_armed(later).expect("arm");
+        // Not asserted directly against the atomic from outside, because that
+        // is the thread's to own; arming a sooner one must still take effect.
+        handle.timer_armed(soon).expect("arm");
+
+        // Arming something further out than what is cached must be a no-op
+        // rather than pushing the deadline back.
+        handle.timer_armed(later).expect("arm");
+
+        // Nothing should have fired: both deadlines are a minute away.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            shared_deadline(&reactor) <= soon,
+            "a later timer pushed the deadline back"
+        );
+    }
+
+    /// Read the cached deadline, for the test above.
+    fn shared_deadline(reactor: &Reactor) -> u64 {
+        reactor.shared.next_deadline.load(Ordering::Acquire)
+    }
+
+    #[test]
+    fn socket_events_do_not_disturb_the_timer_deadline() {
+        // The point of the cache: a flood of readiness must not drag the timer
+        // wheel along with it. If the loop consulted the wheel on every wakeup
+        // this deadline would be recomputed and the assertion would fail.
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+
+        let far = nagoya::now_ns() + 3_600_000_000_000;
+        handle.timer_armed(far).expect("arm");
+
+        let (a, b) = socket_pair();
+        let registration = handle
+            .register(a.as_raw_fd(), Interest::READABLE)
+            .expect("register");
+
+        // Generate real readiness events repeatedly.
+        for _ in 0..50 {
+            let (waker, _woken) = channel_waker();
+            registration.poll_readable(&waker);
+            write_byte(&b);
+            let mut drain = [0u8; 8];
+            // SAFETY: reading into a live local buffer from a valid descriptor.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::read(a.as_raw_fd(), drain.as_mut_ptr().cast::<libc::c_void>(), 8);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert_eq!(
+            shared_deadline(&reactor),
+            far,
+            "socket traffic moved the timer deadline"
         );
     }
 
