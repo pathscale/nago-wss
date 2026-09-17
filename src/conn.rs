@@ -32,8 +32,11 @@
 //! the streaming benchmark deadlocked on the spot, a sender holding frames a
 //! receiver was already blocked waiting for.
 //!
-//! So the encode scratch is reused between frames, which costs no latency and
-//! saves an allocation per message, and the write itself is immediate.
+//! So the write itself is immediate. What is avoided instead is the copying:
+//! the header goes out as its own iovec alongside the caller's payload, so a
+//! frame costs one syscall and no copy of the body at all. A server, which
+//! never masks, touches the payload zero times between the caller handing it
+//! over and the kernel taking it.
 
 use std::io;
 
@@ -103,6 +106,9 @@ impl std::error::Error for Error {
     }
 }
 
+/// How much spare capacity to keep available for each read.
+const READ_CHUNK: usize = 16 * 1024;
+
 /// A live WebSocket connection.
 #[derive(Debug)]
 pub struct Connection {
@@ -159,8 +165,14 @@ impl Connection {
                 return Ok(Some(message));
             }
 
-            let mut chunk = [0u8; 16 * 1024];
-            let read = self.stream.read(&mut chunk).await?;
+            // Read straight into the parse buffer's spare capacity rather
+            // than into an array and then copying: the copy would touch every
+            // byte received, which at 4 KiB messages is most of what the read
+            // path does.
+            if self.read_buffer.capacity() - self.read_buffer.len() < READ_CHUNK {
+                self.read_buffer.reserve(READ_CHUNK);
+            }
+            let read = self.stream.read_buf(&mut self.read_buffer).await?;
             if read == 0 {
                 // A clean close already told us this was coming.
                 if self.assembler.is_closed() {
@@ -168,7 +180,6 @@ impl Connection {
                 }
                 return Err(Error::UnexpectedEof);
             }
-            self.read_buffer.extend_from_slice(&chunk[..read]);
         }
     }
 
@@ -269,27 +280,40 @@ impl Connection {
         // Header and payload go out in one write. Two writes would put a frame
         // header on the wire in its own segment, which with a filled send
         // buffer can leave a peer holding a header and waiting for a body.
-        // The scratch is moved out and put back rather than allocated: it
-        // belongs to the connection, and taking it is what lets the socket
-        // borrow it while `self` is already borrowed for the write.
-        let mut out = core::mem::take(&mut self.scratch);
-        out.clear();
-        out.reserve(header.encoded_len() + payload.len());
-
         let mut header_bytes = [0u8; Header::MAX_ENCODED_LEN];
-        let written = header
+        let header_len = header
             .encode(&mut header_bytes)
             .expect("MAX_ENCODED_LEN is by definition large enough");
-        out.extend_from_slice(&header_bytes[..written]);
-        out.extend_from_slice(payload);
 
-        if let Some(key) = mask {
-            mask::apply(&mut out[written..], key, 0);
+        match mask {
+            // A server never masks, so the payload is already exactly what
+            // goes on the wire. Header and body are handed to the kernel as
+            // two addresses: one syscall, one segment, and the body is not
+            // copied at all.
+            None => {
+                self.stream
+                    .write_all_vectored(&header_bytes[..header_len], payload)
+                    .await?;
+            }
+            // A client must mask, which rewrites every byte, so the payload
+            // cannot go out from the caller's buffer. It is masked into the
+            // connection's scratch, which is reused across frames rather than
+            // allocated per message. The header still rides alongside as its
+            // own iovec rather than being prepended.
+            Some(key) => {
+                let mut scratch = core::mem::take(&mut self.scratch);
+                scratch.clear();
+                scratch.extend_from_slice(payload);
+                mask::apply(&mut scratch, key, 0);
+
+                let result = self
+                    .stream
+                    .write_all_vectored(&header_bytes[..header_len], &scratch)
+                    .await;
+                self.scratch = scratch;
+                result?;
+            }
         }
-
-        let result = self.stream.write_all(&out).await;
-        self.scratch = out;
-        result?;
         Ok(())
     }
 

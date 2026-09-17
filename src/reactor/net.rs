@@ -67,6 +67,53 @@ impl TcpStream {
         self.inner.peer_addr()
     }
 
+    /// Read straight into a `BytesMut`'s spare capacity.
+    ///
+    /// The obvious way to fill a growable buffer is to read into a stack array
+    /// and copy, and that copies every byte received for no reason. This reads
+    /// into the uninitialised tail and then declares how much arrived, so the
+    /// bytes land where they are going to be parsed.
+    ///
+    /// `buffer` must have spare capacity; a full buffer reads nothing and
+    /// returns `Ok(0)`, which the caller would misread as end of stream.
+    pub fn poll_read_buf(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut bytes::BytesMut,
+    ) -> Poll<io::Result<usize>> {
+        let spare = buffer.spare_capacity_mut();
+        if spare.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Reading into uninitialised memory needs `unsafe` to name the bytes,
+        // and this module is unsafe-free by policy. `BytesMut` hands out
+        // `MaybeUninit`, so the tail is zeroed once before the read: that is a
+        // write of the spare capacity rather than of every byte received, it
+        // happens only as the buffer grows, and it keeps the read path free of
+        // an initialisation invariant that a later edit could quietly break.
+        for slot in spare.iter_mut() {
+            slot.write(0);
+        }
+        let filled = buffer.len();
+        let capacity = buffer.capacity();
+        // SAFETY-FREE: the loop above initialised every spare byte, so the
+        // whole capacity is now valid to expose as a slice.
+        buffer.resize(capacity, 0);
+
+        let result = self.poll_read(cx, &mut buffer[filled..]);
+        match result {
+            Poll::Ready(Ok(read)) => {
+                buffer.truncate(filled + read);
+                Poll::Ready(Ok(read))
+            }
+            other => {
+                buffer.truncate(filled);
+                other
+            }
+        }
+    }
+
     /// Read into `buffer`, parking `cx`'s waker if the socket would block.
     pub fn poll_read(&mut self, cx: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
         loop {
@@ -99,6 +146,51 @@ impl TcpStream {
         }
     }
 
+    /// Write two slices as one datagram to the kernel, without joining them.
+    ///
+    /// A WebSocket frame is a short header followed by a payload the caller
+    /// already owns. Concatenating them to get one `write` copies the whole
+    /// payload for the sake of at most fourteen leading bytes. `writev` hands
+    /// the kernel both addresses instead: one syscall, one segment, no copy.
+    pub fn poll_write_vectored(
+        &mut self,
+        cx: &mut Context<'_>,
+        first: &[u8],
+        second: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let slices = [io::IoSlice::new(first), io::IoSlice::new(second)];
+            match self.inner.write_vectored(&slices) {
+                Ok(n) => return Poll::Ready(Ok(n)),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.registration.poll_writable(cx.waker());
+                    return Poll::Pending;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+    }
+
+    /// Write a header and a payload, looping until both are gone.
+    ///
+    /// The partial-write bookkeeping is the reason this is a method rather
+    /// than something the caller assembles: a vectored write can stop anywhere,
+    /// including part way through the header, and resuming it correctly means
+    /// tracking which slice the remainder falls in.
+    pub fn write_all_vectored<'a>(
+        &'a mut self,
+        header: &'a [u8],
+        payload: &'a [u8],
+    ) -> WriteAllVectored<'a> {
+        WriteAllVectored {
+            stream: self,
+            header,
+            payload,
+            written: 0,
+        }
+    }
+
     /// Flush, which is a no-op for an unbuffered socket but completes the trait.
     pub fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
@@ -107,6 +199,17 @@ impl TcpStream {
     /// Read some bytes, as a future.
     pub fn read<'a>(&'a mut self, buffer: &'a mut [u8]) -> Read<'a> {
         Read {
+            stream: self,
+            buffer,
+        }
+    }
+
+    /// Read into a `BytesMut`'s spare capacity, as a future.
+    ///
+    /// See [`Self::poll_read_buf`] for why this exists rather than reading into
+    /// an array and copying.
+    pub fn read_buf<'a>(&'a mut self, buffer: &'a mut bytes::BytesMut) -> ReadBuf<'a> {
+        ReadBuf {
             stream: self,
             buffer,
         }
@@ -138,6 +241,65 @@ impl core::future::Future for Read<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.stream.poll_read(cx, this.buffer)
+    }
+}
+
+/// The future returned by [`TcpStream::write_all_vectored`].
+#[derive(Debug)]
+pub struct WriteAllVectored<'a> {
+    stream: &'a mut TcpStream,
+    header: &'a [u8],
+    payload: &'a [u8],
+    /// Bytes of `header + payload` already accepted by the socket.
+    written: usize,
+}
+
+impl core::future::Future for WriteAllVectored<'_> {
+    type Output = io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let total = this.header.len() + this.payload.len();
+
+        while this.written < total {
+            // Where the remainder starts. Once the header is fully out the
+            // first slice is empty and this degenerates to a plain write of
+            // what is left of the payload.
+            let (first, second) = if this.written < this.header.len() {
+                (&this.header[this.written..], this.payload)
+            } else {
+                (&[][..], &this.payload[this.written - this.header.len()..])
+            };
+
+            match this.stream.poll_write_vectored(cx, first, second) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "socket accepted no bytes",
+                    )));
+                }
+                Poll::Ready(Ok(n)) => this.written += n,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The future returned by [`TcpStream::read_buf`].
+#[derive(Debug)]
+pub struct ReadBuf<'a> {
+    stream: &'a mut TcpStream,
+    buffer: &'a mut bytes::BytesMut,
+}
+
+impl core::future::Future for ReadBuf<'_> {
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.stream.poll_read_buf(cx, this.buffer)
     }
 }
 

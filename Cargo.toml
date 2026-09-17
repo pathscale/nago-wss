@@ -45,3 +45,7 @@ sockudo-ws = "2.0.1"
 [[bench]]
 name = "echo"
 harness = false
+
+[[bench]]
+name = "floor"
+harness = false
