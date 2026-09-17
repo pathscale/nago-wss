@@ -14,6 +14,44 @@
 use super::error::Result;
 
 /// Somewhere to read bytes from and write them to.
+///
+/// # Why this is not nagoya's `io::Read` and `io::Write`
+///
+/// nagoya does have async read and write traits, and reusing them was the
+/// obvious move. Two things stop it, and both are about files versus sockets.
+///
+/// Every method there is `+ Send`. The futures here are deliberately not:
+/// that is what lets a handler hold non-`Send` state across an await, and it
+/// is the model `endpoint-libs` is built on, where the whole dispatch trait is
+/// `?Send`.
+///
+/// And its `ErrorKind` has no `WouldBlock`. It is a file error set - not
+/// found, permission denied - and coarse on purpose, because a file caller
+/// retries or gives up. "Not ready yet" is the signal this entire reactor
+/// turns on and there is nowhere in that enum for it.
+///
+/// So they describe a file and this describes a socket, and the overlap in
+/// their signatures is a coincidence rather than a shared abstraction.
+///
+/// # Why not `embedded-io-async`
+///
+/// It looks like the answer: `no_std`, `async fn`, futures that are not
+/// `Send`, and six million downloads. It is not, and its own source says why.
+/// From `embedded-io`, whose error model the async crate inherits:
+///
+/// > `WouldBlock` is removed, since `embedded-io` traits are always blocking.
+///
+/// An `ErrorKind` with no way to say "not ready yet" cannot describe a
+/// non-blocking socket, which is the only kind this crate has. The `async fn`
+/// signatures are a wrapper over a blocking-shaped error model rather than a
+/// reactive one.
+///
+/// # Why not `futures-io`
+///
+/// Poll-based, so implementing one by hand is a state machine rather than
+/// four lines, and every one of its traits sits behind that crate's `std`
+/// feature: turn it off and it exports nothing, because they take
+/// `std::io::Error`.
 #[allow(async_fn_in_trait)]
 pub trait ByteStream {
     /// Read into `buffer`, returning zero at end of stream.

@@ -15,10 +15,19 @@
 
 pub use nago_rustls::{Errno as TlsErrno, TlsSession};
 
-// Two crates each define what a byte stream is, and they have to agree. The
-// traits are the same two methods, so the bridge is mechanical, but it has to
-// be written here: neither crate can implement the other's trait for the
-// other's type.
+// Two crates each define what a byte stream is, and they have to agree.
+//
+// Collapsing to one definition is the obvious tidy-up and it is the wrong
+// trade. The trait is needed with `tls` off: a deployment that terminates TLS
+// at the edge, which is what the fleet's does, speaks ws:// and still needs
+// `Connection`, the upgrade and the socket. Taking the definition from
+// nago-rustls would put rustls and its crypto in that build, twelve crates
+// including ring, to name two methods. That is the coupling that makes
+// tokio-rustls depend on the whole of tokio.
+//
+// So each crate keeps its own and this bridges them, which costs about thirty
+// lines that only exist when `tls` is on. Neither crate can implement the
+// other's trait for the other's type, so it has to be written here.
 impl nago_rustls::ByteStream for crate::reactor::net::TcpStream {
     async fn read(&mut self, buffer: &mut [u8]) -> nago_rustls::Result<usize> {
         crate::reactor::bytes::ByteStream::read(self, buffer)
