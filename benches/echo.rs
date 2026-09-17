@@ -227,7 +227,14 @@ mod tokio_arm {
                 }
             });
 
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).ok();
+            // `client_async` rather than `connect_async`: the latter takes a
+            // URL and puts the system resolver on the path, which is not what
+            // this benchmark is measuring and which can stall for minutes when
+            // a VPN is holding DNS. The other two arms connect to the address
+            // directly, so this makes all three comparable.
+            let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
                 .await
                 .expect("connect");
             let payload = SMALL.to_vec();
@@ -269,7 +276,14 @@ mod tokio_arm {
                 done_tx.send(Instant::now()).expect("signal");
             });
 
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).ok();
+            // `client_async` rather than `connect_async`: the latter takes a
+            // URL and puts the system resolver on the path, which is not what
+            // this benchmark is measuring and which can stall for minutes when
+            // a VPN is holding DNS. The other two arms connect to the address
+            // directly, so this makes all three comparable.
+            let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
                 .await
                 .expect("connect");
             let payload = vec![0x5Au8; payload_len];

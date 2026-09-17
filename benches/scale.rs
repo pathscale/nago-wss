@@ -249,7 +249,14 @@ mod tokio_arm {
             let establish_start = Instant::now();
             let mut conns = Vec::with_capacity(count);
             for _ in 0..count {
-                let Ok((ws, _)) = tokio_tungstenite::connect_async(format!("ws://{addr}/")).await
+                let Ok(stream) = tokio::net::TcpStream::connect(addr).await else {
+                    continue;
+                };
+                stream.set_nodelay(true).ok();
+                // Ten thousand of these, so ten thousand resolver calls if it
+                // went through a URL. See the note in benches/echo.rs.
+                let Ok((ws, _)) =
+                    tokio_tungstenite::client_async(format!("ws://{addr}/"), stream).await
                 else {
                     break;
                 };

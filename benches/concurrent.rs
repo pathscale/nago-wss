@@ -194,9 +194,14 @@ mod tokio_arm {
             for _ in 0..count {
                 let payload = payload.clone();
                 clients.push(tokio::spawn(async move {
-                    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
-                        .await
-                        .expect("connect");
+                    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                    stream.set_nodelay(true).ok();
+                    // Address rather than URL, so the system resolver is not
+                    // on the path. See the note in benches/echo.rs.
+                    let (mut ws, _) =
+                        tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
+                            .await
+                            .expect("connect");
                     for _ in 0..PER_CONNECTION {
                         ws.send(TMessage::Binary(payload.clone().into()))
                             .await
