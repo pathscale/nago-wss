@@ -27,6 +27,12 @@ simd-utf8 = ["dep:simdutf8"]
 # The bundled trust anchors, forwarded from nago-rustls. Off, a caller
 # supplies its own configuration.
 webpki-roots = ["tls", "nago-rustls/webpki-roots"]
+# Count the reactor's syscalls, forwarded from nagoya. Off by default and
+# compiled out entirely, because the increments sit on the read path and would
+# be measuring the measurement. On, `examples/syscall_probe.rs` can answer how
+# many `recv` calls a WebSocket message actually costs through this crate's
+# read loop rather than through a raw socket, which is a different number.
+syscall-counters = ["reactor", "nagoya/syscall-counters"]
 
 [dependencies]
 # SIMD UTF-8 validation. Optional because the protocol core forbids unsafe and
@@ -111,3 +117,7 @@ required-features = ["simd-utf8"]
 [[example]]
 name = "floor_probe"
 required-features = ["reactor"]
+
+[[example]]
+name = "syscall_probe"
+required-features = ["syscall-counters"]
