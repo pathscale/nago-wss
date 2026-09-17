@@ -131,6 +131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crossbeam-queue"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +254,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "zlib-rs",
+]
+
+[[package]]
+name = "flexpect"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91463e4ffff882636c3bf769011bd013857c57c9485cd0e8f3be0cace23ef7db"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -410,29 +428,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "nago-wss"
-version = "0.1.0"
+name = "nago-rustls"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89df09bc38f982bd2b54f6f8a5409ee3dd19b907be363ee436caab9bf10a9ee9"
 dependencies = [
- "bytes",
- "futures-util",
- "libc",
  "nagoya",
- "rcgen",
  "rustls",
  "rustls-pki-types",
- "sockudo-ws",
- "tokio",
- "tokio-tungstenite",
  "webpki-roots",
 ]
 
 [[package]]
+name = "nago-wss"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "libc",
+ "nago-rustls",
+ "nagoya",
+ "ps-simdutf8",
+ "rcgen",
+ "sockudo-ws",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "nagoya"
-version = "0.1.2"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e452e5a85bf0d60565864a78f270668b98213b21e37369ab77838a1605f9c7f"
 dependencies = [
  "async-task",
+ "bytes",
  "futures-io",
  "futures-util",
+ "libc",
  "ps-st3",
  "spin",
 ]
@@ -557,6 +590,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "ps-simdutf8"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4728371618f944f51f8ad94cd42963dd9a2b78a23689a1819b47ac0e3b060dda"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "flexpect",
+ "rustversion",
 ]
 
 [[package]]
@@ -697,6 +741,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -739,7 +789,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 

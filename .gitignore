@@ -1,1 +1,4 @@
 /target
+
+# The Autobahn suite writes its report here on every run.
+autobahn/reports/

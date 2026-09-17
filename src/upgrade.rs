@@ -10,11 +10,11 @@ use bytes::BytesMut;
 
 use crate::conn::{Connection, Error, Role};
 use crate::proto::handshake::{
-    build_request, build_rejection, build_response, check_response, head_end, new_key,
+    build_rejection, build_request, build_response, check_response, head_end, new_key,
     parse_request, Request, UpgradeError, DEFAULT_MAX_HEAD,
 };
 use crate::proto::message::Limits;
-use crate::reactor::bytes::ByteStream;
+use crate::stream::{ByteStream, StreamExt};
 
 impl From<UpgradeError> for Error {
     fn from(value: UpgradeError) -> Self {
@@ -27,7 +27,7 @@ impl From<UpgradeError> for Error {
 /// A client may send its first frames in the same segment as the request, so
 /// the bytes beyond the head are kept rather than discarded: throwing them
 /// away loses the first message of every fast client.
-async fn read_head<S: ByteStream>(
+async fn read_head<S: ByteStream + StreamExt>(
     stream: &mut S,
     max_head: usize,
 ) -> Result<(Vec<u8>, BytesMut), Error> {
@@ -68,7 +68,7 @@ pub async fn accept<S, F>(
     select: F,
 ) -> Result<(Connection<S>, Request), Error>
 where
-    S: ByteStream,
+    S: ByteStream + StreamExt,
     F: FnOnce(&[alloc::string::String]) -> Option<alloc::string::String>,
 {
     let (head, rest) = read_head(&mut stream, DEFAULT_MAX_HEAD).await?;
@@ -99,7 +99,7 @@ where
 /// because this crate does no I/O of its own and will not reach for a
 /// generator behind the caller's back; §4.1 wants the key unpredictable so a
 /// cache cannot replay a handshake, not secret.
-pub async fn connect<S: ByteStream>(
+pub async fn connect<S: ByteStream + StreamExt>(
     mut stream: S,
     path: &str,
     host: &str,
@@ -125,9 +125,9 @@ pub async fn connect<S: ByteStream>(
 mod tests {
     use super::*;
     use crate::proto::message::Message;
-    use crate::reactor::socket::Addr;
-    use crate::reactor::{Reactor, TcpListener, TcpStream};
     use bytes::Bytes;
+    use nagoya::reactor::Addr;
+    use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
     #[test]
     fn a_full_handshake_then_messages() {
@@ -239,9 +239,7 @@ mod tests {
             .expect("connect");
 
             let key = crate::proto::handshake::new_key([4u8; 16]);
-            let mut wire = crate::proto::handshake::build_request(
-                "/", "localhost", &key, &[], &[],
-            );
+            let mut wire = crate::proto::handshake::build_request("/", "localhost", &key, &[], &[]);
             // A masked text frame carrying "hi", appended to the request so
             // both land in one write.
             wire.extend_from_slice(&[0x81, 0x82, 0, 0, 0, 0, b'h', b'i']);

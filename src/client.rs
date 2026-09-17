@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 
 use crate::conn::{Connection, Error};
 use crate::proto::message::Limits;
-use crate::reactor::driver::Handle;
-use crate::reactor::error::Errno;
-use crate::reactor::net::TcpStream;
-use crate::reactor::socket::Addr;
+use crate::stream::Errno;
+use nagoya::reactor::Addr;
+use nagoya::reactor::Handle;
+use nagoya::reactor::TcpStream;
 
 /// A parsed `ws://` or `wss://` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +141,7 @@ pub struct ClientOptions<'a> {
     ///
     /// `None` uses the webpki roots.
     #[cfg(feature = "tls")]
-    pub tls: Option<alloc::sync::Arc<rustls::ClientConfig>>,
+    pub tls: Option<alloc::sync::Arc<crate::tls::rustls::ClientConfig>>,
 }
 
 impl Default for ClientOptions<'_> {
@@ -283,20 +283,31 @@ pub async fn connect_secure(
     handle: &Handle,
     options: ClientOptions<'_>,
 ) -> Result<Connected<crate::tls::TlsStream<TcpStream>>, Error> {
-    use rustls_pki_types::ServerName;
+    // Through the re-export, so this crate never names a rustls version of
+    // its own and cannot drift from the one nago-rustls links.
+    use crate::tls::rustls_pki_types::ServerName;
 
     let addrs = resolve(&url.host, url.port)?;
     let stream = connect_any(&addrs, handle).await?;
 
+    // The default only exists when the trust anchors are bundled. Without
+    // `webpki-roots` there is nothing to fall back to, so a caller that did
+    // not supply a configuration is asking for a connection that cannot
+    // validate anything, and is told so rather than silently trusting.
+    #[cfg(feature = "webpki-roots")]
     let config = options
         .tls
         .clone()
         .unwrap_or_else(crate::tls::default_client_config);
+    #[cfg(not(feature = "webpki-roots"))]
+    let config = options.tls.clone().ok_or(Error::Url(
+        "wss:// needs a TLS configuration: this build has no bundled roots",
+    ))?;
     // SNI and certificate validation both key off this name, so it is the
     // host from the URL rather than the address that was connected to.
     let name = ServerName::try_from(url.host.clone())
         .map_err(|_| Error::Url("host is not a valid server name"))?;
-    let session = rustls::ClientConnection::new(config, name)
+    let session = crate::tls::rustls::ClientConnection::new(config, name)
         .map_err(|_| Error::Io(Errno(libc::EPROTO)))?;
 
     let mut tls = crate::tls::TlsStream::client(stream, session);
@@ -369,11 +380,11 @@ mod tests {
     #[test]
     fn refuses_urls_it_would_have_to_guess_at() {
         for input in [
-            "example.com/chat",             // no scheme
-            "http://example.com/chat",      // not a websocket scheme
-            "ws:///chat",                   // no host
-            "ws://example.com:noport/",     // port is not a number
-            "ws://user:pass@example.com/",  // credentials
+            "example.com/chat",            // no scheme
+            "http://example.com/chat",     // not a websocket scheme
+            "ws:///chat",                  // no host
+            "ws://example.com:noport/",    // port is not a number
+            "ws://user:pass@example.com/", // credentials
         ] {
             assert!(
                 Url::parse(input).is_err(),
@@ -406,16 +417,16 @@ mod tests {
         // The whole stack in one test: resolve, connect, TLS handshake,
         // WebSocket upgrade, a message each way. Every layer this crate has.
         use crate::proto::message::Message;
-        use crate::reactor::{Reactor, TcpListener};
+        use crate::tls::rustls;
+        use crate::tls::rustls_pki_types::{CertificateDer, PrivateKeyDer};
         use alloc::sync::Arc;
         use bytes::Bytes;
-        use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        use nagoya::reactor::{Reactor, TcpListener};
 
-        let issued = rcgen::generate_simple_self_signed(["localhost".to_string()])
-            .expect("certificate");
+        let issued =
+            rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
         let certificate = CertificateDer::from(issued.cert.der().to_vec());
-        let key =
-            PrivateKeyDer::try_from(issued.signing_key.serialize_der()).expect("key");
+        let key = PrivateKeyDer::try_from(issued.signing_key.serialize_der()).expect("key");
 
         let server_config = Arc::new(
             rustls::ServerConfig::builder()
@@ -439,8 +450,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let (stream, _) = listener.accept().await.expect("accept");
-                let session =
-                    rustls::ServerConnection::new(server_config).expect("session");
+                let session = rustls::ServerConnection::new(server_config).expect("session");
                 let mut tls = crate::tls::TlsStream::server(stream, session);
                 tls.handshake().await.expect("tls handshake");
 
@@ -457,8 +467,7 @@ mod tests {
             });
         });
 
-        let url = Url::parse(&alloc::format!("wss://localhost:{port}/chat"))
-            .expect("url");
+        let url = Url::parse(&alloc::format!("wss://localhost:{port}/chat")).expect("url");
         nagoya::block_on(async {
             let options = ClientOptions {
                 protocols: &["mcp"],
@@ -505,9 +514,6 @@ mod tests {
         let addrs = resolve("localhost", 80).expect("resolve");
         let v4 = addrs.iter().any(|addr| matches!(addr, Addr::V4(..)));
         let v6 = addrs.iter().any(|addr| matches!(addr, Addr::V6(..)));
-        assert!(
-            v4 || v6,
-            "localhost resolved to neither family: {addrs:?}"
-        );
+        assert!(v4 || v6, "localhost resolved to neither family: {addrs:?}");
     }
 }

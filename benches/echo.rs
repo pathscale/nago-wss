@@ -54,8 +54,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use nago_wss::conn::{Connection, Role};
 use nago_wss::proto::message::{Limits, Message};
-use nago_wss::reactor::socket::Addr;
-use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
+use nagoya::reactor::Addr;
+use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 
 /// Messages per sample in the round trip arm.
 ///
@@ -83,7 +83,6 @@ fn local_addr() -> Addr {
     Addr::localhost(0)
 }
 
-
 /// What a set of samples for one arm looks like.
 #[derive(Debug, Clone, Copy)]
 struct Stats {
@@ -104,17 +103,30 @@ fn stats(mut values: Vec<Duration>) -> Stats {
 // --- nago-wss -------------------------------------------------------------
 
 /// One round trip sample: `ROUND_TRIPS` echoes, one at a time.
+///
+/// Both ends use `Reactor::local`, which polls the future on the thread that
+/// returned from the kernel. The threaded reactor hands the wakeup to another
+/// thread, and a park and an unpark is about 3.2us, paid once per message.
+/// That is most of what this benchmark used to measure, and it is avoidable
+/// rather than inherent: one thread driving the connections it owns is the
+/// shape a WebSocket server wants anyway. The tokio arm is a current thread
+/// runtime, so this is the like for like comparison.
 fn nago_round_trip() -> Duration {
-    let reactor = Reactor::start().expect("reactor");
+    use nagoya::reactor::block_on_with;
+
+    let reactor = Reactor::local().expect("reactor");
     let handle = reactor.handle();
     let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_handle = handle.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        nagoya::block_on(async move {
+        let reactor = Reactor::local().expect("reactor");
+        block_on_with(&reactor, async move {
+            // Signal before accepting, so the client cannot connect to a
+            // listener that is not being polled yet.
+            ready_tx.send(()).expect("signal");
             let (stream, _) = listener.accept().await.expect("accept");
-            drop(server_handle);
             let mut conn = Connection::new(stream, Role::Server, Limits::default());
             for _ in 0..ROUND_TRIPS {
                 let message = conn.read().await.expect("read").expect("message");
@@ -123,7 +135,8 @@ fn nago_round_trip() -> Duration {
         });
     });
 
-    let elapsed = nagoya::block_on(async {
+    ready_rx.recv().expect("server ready");
+    let elapsed = block_on_with(&reactor, async {
         let stream = TcpStream::connect(addr, &handle).await.expect("connect");
         let mut conn = Connection::new(stream, Role::Client, Limits::default());
         let payload = Bytes::from_static(SMALL);
@@ -170,11 +183,12 @@ fn nago_stream(payload_len: usize) -> Duration {
         let payload = Bytes::from(vec![0x5Au8; payload_len]);
 
         let start = Instant::now();
-        for _ in 0..STREAM_MESSAGES {
-            conn.write(Message::Binary(payload.clone()))
-                .await
-                .expect("write");
-        }
+        // The whole burst is handed over at once, which is what lets the
+        // connection coalesce it. A caller with one message still uses
+        // `write`, which is unchanged.
+        conn.write_all((0..STREAM_MESSAGES).map(|_| Message::Binary(payload.clone())))
+            .await
+            .expect("write_all");
         start
     });
 
@@ -213,7 +227,14 @@ mod tokio_arm {
                 }
             });
 
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).ok();
+            // `client_async` rather than `connect_async`: the latter takes a
+            // URL and puts the system resolver on the path, which is not what
+            // this benchmark is measuring and which can stall for minutes when
+            // a VPN is holding DNS. The other two arms connect to the address
+            // directly, so this makes all three comparable.
+            let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
                 .await
                 .expect("connect");
             let payload = SMALL.to_vec();
@@ -255,7 +276,14 @@ mod tokio_arm {
                 done_tx.send(Instant::now()).expect("signal");
             });
 
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            stream.set_nodelay(true).ok();
+            // `client_async` rather than `connect_async`: the latter takes a
+            // URL and puts the system resolver on the path, which is not what
+            // this benchmark is measuring and which can stall for minutes when
+            // a VPN is holding DNS. The other two arms connect to the address
+            // directly, so this makes all three comparable.
+            let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
                 .await
                 .expect("connect");
             let payload = vec![0x5Au8; payload_len];
@@ -416,6 +444,22 @@ fn per_op(duration: Duration, operations: usize) -> f64 {
 
 /// Whether two arms' sample ranges overlap, in which case their ordering is an
 /// artefact of scheduling rather than a property of the code.
+/// Messages per second, grouped, because the fleet level question is how many
+/// messages a second a process moves rather than how many microseconds one of
+/// them took. The two are the same number and only one of them is readable at
+/// a glance.
+fn thousands(value: f64) -> String {
+    let whole = format!("{:.0}", value);
+    let mut out = String::new();
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 fn overlaps(a: Stats, b: Stats) -> bool {
     a.best <= b.worst && b.best <= a.worst
 }
@@ -423,9 +467,11 @@ fn overlaps(a: Stats, b: Stats) -> bool {
 fn report(name: &str, arms: &[(&str, Stats)], operations: usize) {
     println!("{name}");
     for (label, arm) in arms {
+        let median = per_op(arm.median, operations);
         println!(
-            "  {label:<20} {:>8.2} us/op  (best {:.2}, worst {:.2})",
-            per_op(arm.median, operations),
+            "  {label:<20} {:>8.2} us/op  {:>12} msg/s  (best {:.2}, worst {:.2})",
+            median,
+            thousands(1e6 / median),
             per_op(arm.best, operations),
             per_op(arm.worst, operations),
         );

@@ -14,7 +14,7 @@
 //! complete a WebSocket handshake, and SHA-1's collision weaknesses do not
 //! bear on that. This is not a general purpose hash and must not be used as one.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// The GUID from RFC 6455 §1.3, concatenated with the client key before hashing.
@@ -38,9 +38,9 @@ pub fn accept_for(key: &[u8]) -> String {
 pub fn is_valid_key(key: &[u8]) -> bool {
     key.len() == 24
         && key.ends_with(b"==")
-        && key[..22].iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/'
-        })
+        && key[..22]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/')
 }
 
 // --- base64 ---------------------------------------------------------------
@@ -84,9 +84,7 @@ struct Sha1 {
 impl Sha1 {
     fn new() -> Self {
         Self {
-            state: [
-                0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0,
-            ],
+            state: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
             buffer: Vec::new(),
             length: 0,
         }
@@ -233,7 +231,10 @@ mod tests {
     #[test]
     fn computes_the_accept_value_from_the_rfc() {
         // RFC 6455 §1.3 works this exact example end to end.
-        assert_eq!(accept_for(b"dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            accept_for(b"dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     /// A well formed request, which the negative cases below mutate.
@@ -281,7 +282,8 @@ mod tests {
     fn accepts_connection_with_other_tokens_alongside_upgrade() {
         // Proxies add tokens to this header; requiring it to equal "Upgrade"
         // exactly breaks real clients.
-        let request = good_request().replace("Connection: Upgrade", "Connection: keep-alive, Upgrade");
+        let request =
+            good_request().replace("Connection: Upgrade", "Connection: keep-alive, Upgrade");
         assert!(parse_request(request.as_bytes(), DEFAULT_MAX_HEAD).is_ok());
     }
 
@@ -385,7 +387,9 @@ mod tests {
         assert!(text.contains("Sec-WebSocket-Version: 13"), "{text}");
 
         let bad = build_rejection(UpgradeError::NotGet);
-        assert!(core::str::from_utf8(&bad).unwrap().starts_with("HTTP/1.1 400"));
+        assert!(core::str::from_utf8(&bad)
+            .unwrap()
+            .starts_with("HTTP/1.1 400"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ jobs:
       - run: cargo check --lib --no-default-features
 
   hosted:
-    name: Hosted tests and guide examples
+    name: Hosted tests
     runs-on: ubicloud-standard-2
     steps:
       - uses: actions/checkout@v4
