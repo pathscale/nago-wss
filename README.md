@@ -56,131 +56,151 @@ value. It is not a general-purpose hash and should not be used as one.
 
 ## Numbers
 
-Re-measured 2026-09-18 on an idle 16 core M-series laptop, after the reactor
-moved to nagoya. Rates are operations per second; the three arms are this
-crate, tungstenite (what the fleet runs today) and sockudo-ws, each through its
-own public entry point.
+Measured 2026-09-18 on an idle laptop: 12 performance cores and 4 efficiency
+cores, 16 logical. Three arms throughout: this crate, tokio-tungstenite (what
+the fleet runs today) and sockudo-ws, each through its own public entry point.
 
-Every arm now connects to a `SocketAddr` directly. The tokio arms used to
-connect by URL, which put the system resolver in front of the socket: that is
-not what any of this is measuring, and with a VPN holding DNS it turned a one
-second benchmark into a multi minute one. Numbers taken before that was fixed
-penalised the tokio arms and should not be compared against these.
+Everything below is one run of each benchmark, reported whether it flatters
+this crate or not. Where a benchmark is unstable, the spread is stated rather
+than hidden behind a single figure.
 
-Run them with `cargo bench --features simd-utf8`. The earlier table here was
-taken on a machine under heavy load and every figure in it was low by roughly
-four times, which is why these are larger rather than better.
+### Reproducing
 
-### Masking
+Do not use `cargo bench`: it rebuilds and has hung here. Build once, then run
+each binary directly.
 
-Every byte a client sends and every byte a server receives.
+```sh
+cargo build --release --benches --features simd-utf8
 
-| payload | nago-wss | tungstenite | sockudo-ws |
-|---|---|---|---|
-| 64 B | 18.46 GB/s | 18.96 | **22.59** |
-| 1 KB | **85.52** | 70.33 | 53.99 |
-| 16 KB | 118.36 | 118.42 | 58.89 |
-| 256 KB | 68.10 | **68.56** | 62.82 |
+B=$(ls -t target/release/deps/micro-*      | grep -v '\.d$' | head -1); "$B" --bench
+B=$(ls -t target/release/deps/echo-*       | grep -v '\.d$' | head -1); "$B" --bench
+B=$(ls -t target/release/deps/concurrent-* | grep -v '\.d$' | head -1); "$B" --bench
+B=$(ls -t target/release/deps/scale-*      | grep -v '\.d$' | head -1); "$B" --bench
+B=$(ls -t target/release/deps/floor-*      | grep -v '\.d$' | head -1); "$B" --bench
+```
 
-A 64-bit word loop. It beats sockudo-ws's hand written NEON at 1 KB and above,
-by a wide margin, and loses to it at 64 bytes where there are too few
-iterations to amortise the call. Against tungstenite's 32-bit loop it wins at
-1 KB and ties within a percent everywhere else, which is inside this
-benchmark's run to run spread: do not read those rows as a win in either
-direction. No unsafe.
+`micro` requires `--features simd-utf8` and refuses to run without it, so it
+cannot silently measure the scalar fallback. `echo` hangs intermittently for
+reasons not yet understood; re-run it if it does not finish.
 
-### UTF-8 validation
+Every arm connects to a `SocketAddr` directly. The tokio arms used to connect
+by URL, which put the system resolver in front of the socket: with a VPN
+holding DNS that turned a one second benchmark into a multi minute one.
+Numbers taken before that was fixed penalised the tokio arms and are not
+comparable to these.
 
-Text frames only; binary skips it. Requires `--features simd-utf8`, and the
-benchmark refuses to build without it: the fallback is the standard library's
-byte loop, which is the same code as the tungstenite column, and measuring it
-makes this crate look three times slower than it is.
+### The one that matters: concurrent throughput
 
-| payload | nago-wss | tungstenite | sockudo-ws |
-|---|---|---|---|
-| ascii 64 B | **40.21 GB/s** | 20.65 | 36.89 |
-| ascii 1 KB | **168.04** | 54.19 | 162.07 |
-| ascii 16 KB | 169.60 | 56.81 | **170.16** |
-| ascii 256 KB | **109.26** | 55.18 | 108.79 |
-| mixed 64 B | **12.68** | 2.42 | 12.68 |
-| mixed 1 KB | **13.49** | 2.96 | 13.29 |
-| mixed 16 KB | 13.57 | 2.69 | **13.71** |
-| mixed 256 KB | **13.75** | 2.51 | 13.66 |
+Aggregate messages per second through the process, 256 byte echo, server and
+clients in one process over loopback. This is the shape a fleet actually runs
+and the benchmark to read first.
 
-Level with sockudo-ws's hand written SIMD, within one percent either way, and
-three to five times ahead of tungstenite. Ours is `simdutf8`, a crate that
-contains unsafe but is not this crate's unsafe, which is why it is a feature.
+| conns | nago-wss | tokio-tungstenite | sockudo-ws | standing |
+|---|---|---|---|---|
+| 1 | 16.0k-16.7k | 42.0k-46.2k | 41.9k-49.2k | **behind, roughly 2.6x** |
+| 8 | 133k-143k | 181k-201k | 142k-166k | **behind, roughly 1.4x** |
+| 32 | 174k | 177k-183k | 137k-138k | level with tokio, ahead of sockudo |
 
-### A whole message
+With the clients moved onto the server's reactor rather than one reactor per
+client thread, which is the shape tokio's arm already had: 19.7k-28.3k at one
+connection, 146k-148k at eight, 168k-174k at 32. Better at one connection, not
+enough to close either gap.
 
-Encode, mask, decode, unmask, reassemble.
+The deficit is at low connection counts and closes as load rises. It is not
+explained; the list of explanations already measured and withdrawn is under
+[Where this loses](#where-this-loses).
 
-| payload | rate |
-|---|---|
-| 64 B | 36.1M msg/s |
-| 1 KB | 12.8M msg/s |
-| 16 KB | 1.38M msg/s |
+### Everything else, in one table
 
-### Ten thousand connections
+Concurrent throughput is above and not repeated here. Bold is the winner of a
+row. `msg/s` is messages per second, higher better; `us/op` is microseconds per
+operation, lower better.
 
-Both ends in one process, so every arm is handicapped the same way.
+| bench | case | nago-wss | tokio-tungstenite | sockudo-ws | result |
+|---|---|---|---|---|---|
+| echo | round trip 43 B | 19.37 us/op, 51,635 msg/s | 18.59 us/op, 53,795 msg/s | **15.94 us/op, 62,717 msg/s** | sockudo 1.21x faster; tokio within sample overlap |
+| echo | streaming 64 B | 0.05 us/op, 19,933,422 msg/s, 1231 MiB/s | 1.45 us/op, 689,002 msg/s, 51 MiB/s | 1.66 us/op, 603,531 msg/s, 53 MiB/s | see the caveat below, this is not like for like |
+| echo | streaming 4096 B | 0.65 us/op, 1,528,517 msg/s, 6065 MiB/s | 1.79 us/op, 558,490 msg/s, 2192 MiB/s | 1.82 us/op, 548,647 msg/s, 2269 MiB/s | same caveat |
+| scale | 10k establish | **0.43 s** | 0.81 s | 1.18 s | nago 1.9x faster |
+| scale | 10k broadcast | **101 ms** | 329 ms | 285 ms | nago 3.3x faster |
+| scale | 10k bytes per conn | 43,624 B | 151,620 B | **35,433 B** | sockudo lowest, nago 3.5x under tokio |
+| floor | 1 B round trip, threaded | 24.51 us/op | **15.14 us/op** (one thread) | - | tokio 1.6x faster |
+| floor | 1 B round trip, local | 21.21 us/op | 18.48 us/op (two threads) | - | tokio faster |
+| micro | masking 64 B | 241,113,736/s, 15.43 GB/s | 306,267,555/s, 19.60 GB/s | **323,364,033/s, 20.70 GB/s** | sockudo 1.34x, tungstenite 1.27x |
+| micro | masking 1024 B | **85,478,041/s, 87.53 GB/s** | 70,236,307/s, 71.92 GB/s | 52,773,304/s, 54.04 GB/s | nago wins |
+| micro | masking 16384 B | 7,303,615/s, 119.66 GB/s | **7,415,821/s, 121.50 GB/s** | 3,740,077/s, 61.28 GB/s | tungstenite 1.02x |
+| micro | masking 262144 B | 265,218/s, 69.53 GB/s | **269,843/s, 70.74 GB/s** | 242,804/s, 63.65 GB/s | tungstenite 1.02x |
+| micro | utf8 ascii 64 B | 581,397,943/s, 37.21 GB/s | 325,128,825/s, 20.81 GB/s | **631,382,711/s, 40.41 GB/s** | sockudo 1.09x |
+| micro | utf8 ascii 1024 B | 156,285,610/s, 160.04 GB/s | 52,376,618/s, 53.63 GB/s | **161,759,969/s, 165.64 GB/s** | sockudo 1.04x |
+| micro | utf8 ascii 16384 B | 10,405,548/s, 170.48 GB/s | 3,345,538/s, 54.81 GB/s | **10,433,817/s, 170.95 GB/s** | sockudo 1.00x |
+| micro | utf8 ascii 262144 B | 414,980/s, 108.78 GB/s | 202,315/s, 53.04 GB/s | **418,426/s, 109.69 GB/s** | sockudo 1.01x |
+| micro | utf8 mixed 64 B | **199,912,453/s, 12.79 GB/s** | 41,074,204/s, 2.63 GB/s | 198,607,180/s, 12.71 GB/s | nago level with sockudo, 5x tungstenite |
+| micro | utf8 mixed 1023 B | **13,416,891/s, 13.73 GB/s** | 2,679,180/s, 2.74 GB/s | 13,348,389/s, 13.66 GB/s | nago level with sockudo |
+| micro | utf8 mixed 16384 B | **844,940/s, 13.84 GB/s** | 176,128/s, 2.89 GB/s | 843,252/s, 13.82 GB/s | nago level with sockudo |
+| micro | utf8 mixed 262144 B | 52,578/s, 13.78 GB/s | 10,729/s, 2.81 GB/s | **52,682/s, 13.81 GB/s** | sockudo 1.00x |
 
-| | establish | broadcast | memory |
-|---|---|---|---|
-| nago-wss | **0.42 s** | **94.8 ms** | 43.6 KB/conn |
-| tokio-tungstenite | 0.73 s | 419.9 ms | 151.5 KB/conn |
-| sockudo-ws | 1.12 s | 281.6 ms | **35.4 KB/conn** |
+Protocol core operations with no comparison arm, because the other two crates
+do not expose an equivalent entry point. Sizes are 64 B, 1024 B, 16384 B and
+262144 B:
 
-Broadcast is 4.4x tokio-tungstenite's and establish 1.7x, on 3.5x less memory.
-This is the most repeatable result here: broadcast has measured between 85 and
-89ms across every run since reactor wakes were routed to the worker holding
-each descriptor, against 95 to 99ms before it.
+| operation | 64 B | 1024 B | 16384 B | 262144 B |
+|---|---|---|---|---|
+| decode frame (masked) | 4.2 ns | 20.1 ns | 292.3 ns | 7374.9 ns |
+| encode header | 2.0 ns | 1.8 ns | 1.5 ns | 2.0 ns |
+| encode frame (client) | 3.7 ns | 24.4 ns | 274.9 ns | 7362.5 ns |
+| assemble (unfragmented) | 6.4 ns | 6.4 ns | 6.4 ns | 6.3 ns |
+| full message (encode, decode, assemble) | 26.7 ns | 72.0 ns | 712.0 ns | 16072.4 ns |
 
-### Concurrency
+Handshake accept key: 425.2 ns, 2,351,610/s. Buffer alloc and fill: 23.0 ns,
+43,386,441/s.
 
-Aggregate throughput, 256 byte echo, messages per second.
+### The streaming figure is not a like for like win
 
-| connections | nago-wss | tokio-tungstenite | sockudo-ws |
-|---|---|---|---|
-| 1 | **18,979** | 16,715 | 18,444 |
-| 8 | 137,151 | **186,643** | 153,721 |
-| 32 | 168,731 | **181,905** | 134,774 |
+`echo`'s streaming rows show this crate at 24x tokio-tungstenite at 64 bytes.
+That is a batching difference, not a speed difference: `Connection::write_all`
+coalesces a caller supplied batch into a single write, and the other two arms
+send one message per call. A caller that hands this crate one message at a
+time will not see that number. It is in the table because it is what the
+benchmark measures, and it is annotated because quoting it unqualified would
+be dishonest.
 
-**Read this table with suspicion.** The same binary on an idle machine has
-produced 90k and 182k at eight connections on consecutive runs, so a single
-reading of any row is worth little and the earlier numbers here, which showed
-this crate winning at one and eight connections, were that noise rather than a
-result. What repeats is the shape: tokio-tungstenite leads in the middle, and
-the three converge by thirty two.
+### What is unstable, and by how much
 
-Ten thousand connections, below, is the count that does repeat, and it is also
-the one a fleet actually runs.
+Three of these benchmarks do not repeat well, and a single reading from any of
+them should not be quoted:
+
+- `concurrent` at 8 connections has been observed between 90k and 182k msg/s
+  on identical code. The two runs above are 133k and 143k.
+- `floor`'s threaded arm swings between 17.77 and 24.66 us on unchanged code,
+  and has beaten the local arm in one run of three.
+- `echo` hangs intermittently, cause unknown.
+
+`scale` and `micro` repeat reliably.
 
 ### Where this loses
 
-A single connection doing one round trip at a time on loopback: 19.1us against
-tokio-tungstenite's 17.1 and sockudo-ws's 15.1, so 1.13x and 1.30x behind.
+At one connection and at eight, against both other crates. At 32 connections
+it is level with tokio and ahead of sockudo, so the deficit is at low
+connection counts and closes as load rises.
 
-Most of that is neither crate's, and most of the rest is one thing: a reactor
-that polls on a different thread from the one the kernel returned to pays a
-park and an unpark per message, measured at 3.6us. `Reactor::local` does not,
-and is 2.4 to 2.9us faster than the threaded reactor as a result. Use it for a
-connection driven by one thread, which is the shape a WebSocket server usually
-wants anyway.
+That gap is not yet explained. Several explanations have been offered and
+each was withdrawn after measurement:
 
-What is left after that is not a fixed cost. Against a tokio arm given the same
-two thread shape, eight consecutive paired runs on an idle machine put this
-crate 3.4us behind seven times and exactly level once, from the same binary.
-That is a scheduling interaction rather than slow code, and chasing it means
-pinning threads and reading the scheduler. `benches/floor.rs` has the numbers
-and the list of what has already been measured and ruled out.
+- Syscall count. Measured at `Connection::read` with nagoya's counters: one
+  `recv` per message and zero `EWOULDBLOCK` at 1, 8 and 32 connections. The
+  read path is already at the floor.
+- Reactor sharding. `Reactor::sharded` measured worse: 120k against 135k at
+  eight connections.
+- Masking. A NEON implementation was slower than the scalar word loop at every
+  size.
+- The thread handoff. A single thread reactor loop measures 20.13us against
+  tokio's 18.38, so the ceiling is already below target and removing the
+  handoff cannot close it.
+- Worker pool parking. A profile suggested it; an exact counter refuted it,
+  reporting zero spurious wakes at every pool size.
 
-Worth noting where this crate is not behind: waking a task and repolling it,
-with no I/O at all, is 0.0018us here against tokio's 0.0714.
-
-Run them with `cargo bench --features simd-utf8`, or one at a time with
-`--bench micro`, `--bench echo`, `--bench concurrent`, `--bench scale`,
-`--bench floor`.
+`benches/floor.rs` and `examples/worker_sweep.rs` carry the full list of what
+has been ruled out, with the numbers.
 
 ## Status
 
