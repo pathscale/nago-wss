@@ -1,0 +1,633 @@
+//! A WebSocket connection: the protocol core driven over a real socket.
+//!
+//! # What joins here
+//!
+//! [`proto`](crate::proto) knows the protocol and no I/O. [`reactor`](crate::reactor)
+//! knows I/O and no protocol. This is the only place the two meet, which is why
+//! the seam stayed cheap: everything above deals in [`Message`], everything
+//! below in bytes, and neither has to know about the other.
+//!
+//! # Buffering
+//!
+//! One read buffer per connection, reused across frames. A frame is parsed in
+//! place out of it and its payload copied once, into the `Bytes` the message
+//! carries. That single copy is what makes the payload reference counted and
+//! cheap to hand around afterwards, which is what the endpoint-libs seam wants.
+//!
+//! The buffer compacts rather than growing without bound: once a frame is
+//! consumed the remainder shifts down, so a long-lived connection sending small
+//! frames keeps a small buffer.
+
+use std::io;
+
+use bytes::{Bytes, BytesMut};
+
+use crate::proto::frame::{FrameError, Header};
+use crate::proto::message::{Assembler, Limits, Message, ProtocolError};
+use crate::proto::opcode::{CloseCode, OpCode};
+use crate::proto::{mask, message::CloseFrame};
+use crate::reactor::net::TcpStream;
+
+/// Which side of the connection this is.
+///
+/// It decides masking: RFC 6455 §5.1 requires a client to mask every frame it
+/// sends and a server to mask none, and requires each to reject the other's
+/// mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The connecting side. Masks what it sends.
+    Client,
+    /// The accepting side. Never masks.
+    Server,
+}
+
+/// Anything that can go wrong on a live connection.
+#[derive(Debug)]
+pub enum Error {
+    /// The transport failed.
+    Io(io::Error),
+    /// A frame could not be decoded.
+    Frame(FrameError),
+    /// A rule spanning frames was broken.
+    Protocol(ProtocolError),
+    /// The peer masked when it should not have, or did not when it should.
+    ///
+    /// §5.1: a server must close on an unmasked client frame, and a client must
+    /// close on a masked server frame. Tolerating either hides a broken peer.
+    MaskingViolation,
+    /// The peer closed the connection without a closing handshake.
+    UnexpectedEof,
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "io: {error}"),
+            Self::Frame(error) => write!(formatter, "frame: {error:?}"),
+            Self::Protocol(error) => write!(formatter, "protocol: {error:?}"),
+            Self::MaskingViolation => formatter.write_str("masking rule violated"),
+            Self::UnexpectedEof => formatter.write_str("closed without a handshake"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// A live WebSocket connection.
+#[derive(Debug)]
+pub struct Connection {
+    stream: TcpStream,
+    role: Role,
+    assembler: Assembler,
+    /// Unparsed bytes from the socket.
+    read_buffer: BytesMut,
+    /// The next masking key to use, for a client. See [`Self::next_mask`].
+    mask_state: u64,
+    /// Set once a close frame has been sent, so it is not sent twice.
+    close_sent: bool,
+}
+
+impl Connection {
+    /// Wrap an already upgraded stream.
+    ///
+    /// The handshake is the caller's business; by the time a `Connection`
+    /// exists, both sides have agreed to speak WebSocket.
+    pub fn new(stream: TcpStream, role: Role, limits: Limits) -> Self {
+        Self {
+            stream,
+            role,
+            assembler: Assembler::new(limits),
+            read_buffer: BytesMut::with_capacity(8 * 1024),
+            mask_state: seed_from(&stream_seed()),
+            close_sent: false,
+        }
+    }
+
+    /// The role this side is playing.
+    #[inline]
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Read the next message, waiting for it to arrive.
+    ///
+    /// Returns `Ok(None)` when the peer closed cleanly after a close handshake.
+    pub async fn read(&mut self) -> Result<Option<Message>, Error> {
+        loop {
+            // Try to satisfy the request from what is already buffered before
+            // going back to the socket: a single read often carries several
+            // frames, and returning to the reactor between them would be a
+            // syscall per message rather than per batch.
+            if let Some(message) = self.parse_buffered()? {
+                return Ok(Some(message));
+            }
+
+            let mut chunk = [0u8; 16 * 1024];
+            let read = self.stream.read(&mut chunk).await?;
+            if read == 0 {
+                // A clean close already told us this was coming.
+                if self.assembler.is_closed() {
+                    return Ok(None);
+                }
+                return Err(Error::UnexpectedEof);
+            }
+            self.read_buffer.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// Try to take one message out of the buffer without touching the socket.
+    fn parse_buffered(&mut self) -> Result<Option<Message>, Error> {
+        loop {
+            let limits = self.assembler.limits();
+            let decoded = Header::decode(&self.read_buffer, limits.max_frame).map_err(Error::Frame)?;
+            let Ok((header, header_len)) = decoded else {
+                return Ok(None);
+            };
+
+            let total = header_len + header.payload_len as usize;
+            if self.read_buffer.len() < total {
+                // Reserve the rest up front so the frame lands in one
+                // allocation rather than growing the buffer repeatedly.
+                self.read_buffer.reserve(total - self.read_buffer.len());
+                return Ok(None);
+            }
+
+            // §5.1, both directions. Checked before the payload is touched.
+            match (self.role, header.mask) {
+                (Role::Server, None) | (Role::Client, Some(_)) => {
+                    return Err(Error::MaskingViolation);
+                }
+                _ => {}
+            }
+
+            let mut payload = self.read_buffer.split_to(total).split_off(header_len);
+            if let Some(key) = header.mask {
+                mask::apply(&mut payload, key, 0);
+            }
+
+            match self
+                .assembler
+                .accept(header.opcode, header.fin, payload.freeze())
+            {
+                Ok(Some(message)) => return Ok(Some(message)),
+                // A fragment that did not complete a message: keep going, there
+                // may be more already buffered.
+                Ok(None) => continue,
+                Err(error) => return Err(Error::Protocol(error)),
+            }
+        }
+    }
+
+    /// Send a message.
+    pub async fn write(&mut self, message: Message) -> Result<(), Error> {
+        let (opcode, payload) = match message {
+            Message::Text(payload) => (OpCode::Text, payload),
+            Message::Binary(payload) => (OpCode::Binary, payload),
+            Message::Ping(payload) => (OpCode::Ping, payload),
+            Message::Pong(payload) => (OpCode::Pong, payload),
+            Message::Close(frame) => {
+                self.close_sent = true;
+                (OpCode::Close, encode_close_body(frame))
+            }
+        };
+        self.write_frame(opcode, true, &payload).await
+    }
+
+    /// Answer a ping. The payload must be echoed exactly, per §5.5.2.
+    pub async fn pong(&mut self, payload: Bytes) -> Result<(), Error> {
+        self.write_frame(OpCode::Pong, true, &payload).await
+    }
+
+    /// Start the closing handshake.
+    ///
+    /// Sending twice is a no-op rather than an error: a connection closing for
+    /// two reasons at once is ordinary, and the second close is redundant
+    /// rather than wrong.
+    pub async fn close(&mut self, frame: Option<CloseFrame>) -> Result<(), Error> {
+        if self.close_sent {
+            return Ok(());
+        }
+        self.write(Message::Close(frame)).await
+    }
+
+    /// Encode and send one frame.
+    async fn write_frame(
+        &mut self,
+        opcode: OpCode,
+        fin: bool,
+        payload: &[u8],
+    ) -> Result<(), Error> {
+        let mask = match self.role {
+            Role::Client => Some(self.next_mask()),
+            Role::Server => None,
+        };
+
+        let header = Header {
+            fin,
+            opcode,
+            mask,
+            payload_len: payload.len() as u64,
+        };
+
+        // Header and payload go out in one write. Two writes would put a frame
+        // header on the wire in its own segment, which with a filled send
+        // buffer can leave a peer holding a header and waiting for a body.
+        let mut out = Vec::with_capacity(header.encoded_len() + payload.len());
+        let mut header_bytes = [0u8; Header::MAX_ENCODED_LEN];
+        let written = header
+            .encode(&mut header_bytes)
+            .expect("MAX_ENCODED_LEN is by definition large enough");
+        out.extend_from_slice(&header_bytes[..written]);
+        out.extend_from_slice(payload);
+
+        if let Some(key) = mask {
+            let body = &mut out[written..];
+            mask::apply(body, key, 0);
+        }
+
+        self.stream.write_all(&out).await?;
+        Ok(())
+    }
+
+    /// The next masking key.
+    ///
+    /// §5.3 wants a value the peer cannot predict, to stop a client being used
+    /// to inject chosen bytes into a proxy that misparses the stream. This is a
+    /// SplitMix64 over a seed taken from the address space and the clock, which
+    /// is unpredictable to a remote peer without pulling in a CSPRNG for a
+    /// value that is not a secret and is sent in cleartext in every frame.
+    fn next_mask(&mut self) -> [u8; 4] {
+        self.mask_state = self.mask_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.mask_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z as u32).to_ne_bytes()
+    }
+}
+
+/// A seed for the masking sequence.
+fn stream_seed() -> [u8; 16] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |value| value.as_nanos() as u64);
+    // The address of a stack local varies with ASLR between processes, which
+    // the clock alone does not give on a machine where two processes start in
+    // the same nanosecond.
+    let local = 0u8;
+    let address = core::ptr::addr_of!(local) as u64;
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&nanos.to_ne_bytes());
+    out[8..].copy_from_slice(&address.to_ne_bytes());
+    out
+}
+
+fn seed_from(bytes: &[u8; 16]) -> u64 {
+    let mut first = [0u8; 8];
+    let mut second = [0u8; 8];
+    first.copy_from_slice(&bytes[..8]);
+    second.copy_from_slice(&bytes[8..]);
+    u64::from_ne_bytes(first) ^ u64::from_ne_bytes(second)
+}
+
+/// Encode a close frame body: a code then a reason, or nothing at all.
+fn encode_close_body(frame: Option<CloseFrame>) -> Bytes {
+    let Some(frame) = frame else {
+        return Bytes::new();
+    };
+    // A code that must never be sent is replaced rather than transmitted: the
+    // caller asking for it is a bug, but putting it on the wire would make the
+    // peer close on us for a protocol violation we introduced.
+    let code = if frame.code.is_sendable() {
+        frame.code
+    } else {
+        CloseCode::INTERNAL_ERROR
+    };
+    let mut out = Vec::with_capacity(2 + frame.reason.len());
+    out.extend_from_slice(&code.0.to_be_bytes());
+    out.extend_from_slice(&frame.reason);
+    Bytes::from(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reactor::{Reactor, TcpListener};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn local() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    /// Run a client and a server against each other over real TCP.
+    ///
+    /// The bodies are given the already wrapped `Connection`, so a test says
+    /// what it wants to exchange rather than how to set a socket up.
+    fn exchange<S, C>(server: S, client: C)
+    where
+        S: FnOnce(Connection) + Send + 'static,
+        C: FnOnce(Connection) + Send + 'static,
+    {
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+        let listener = TcpListener::bind(local(), &handle).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client_handle = handle.clone();
+        let client_thread = std::thread::spawn(move || {
+            nagoya::block_on(async move {
+                let stream = crate::reactor::TcpStream::connect(addr, &client_handle)
+                    .expect("connect");
+                client(Connection::new(stream, Role::Client, Limits::default()));
+            });
+        });
+
+        nagoya::block_on(async {
+            let (stream, _) = listener.accept().await.expect("accept");
+            server(Connection::new(stream, Role::Server, Limits::default()));
+        });
+
+        client_thread.join().expect("client thread");
+    }
+
+    #[test]
+    fn a_text_message_survives_the_round_trip() {
+        exchange(
+            |mut server| {
+                nagoya::block_on(async move {
+                    let message = server.read().await.expect("read").expect("a message");
+                    assert_eq!(message, Message::Text(Bytes::from_static(b"hello")));
+                    // Echo it back so the client can check the server path too.
+                    server.write(message).await.expect("write");
+                });
+            },
+            |mut client| {
+                nagoya::block_on(async move {
+                    client
+                        .write(Message::Text(Bytes::from_static(b"hello")))
+                        .await
+                        .expect("write");
+                    let echoed = client.read().await.expect("read").expect("a message");
+                    assert_eq!(echoed, Message::Text(Bytes::from_static(b"hello")));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn a_large_binary_message_survives_the_round_trip() {
+        // Past the 16 bit length boundary, so the extended header is exercised
+        // on the wire rather than only in the codec's own tests, and past a
+        // socket buffer so it necessarily spans several reads.
+        const SIZE: usize = 300 * 1024;
+
+        exchange(
+            |mut server| {
+                nagoya::block_on(async move {
+                    let message = server.read().await.expect("read").expect("a message");
+                    let Message::Binary(payload) = message else {
+                        panic!("wrong kind");
+                    };
+                    assert_eq!(payload.len(), SIZE, "truncated in transit");
+                    assert!(
+                        payload.iter().all(|byte| *byte == 0x5A),
+                        "corrupted in transit"
+                    );
+                });
+            },
+            |mut client| {
+                nagoya::block_on(async move {
+                    let payload = Bytes::from(alloc::vec![0x5Au8; SIZE]);
+                    client.write(Message::Binary(payload)).await.expect("write");
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn several_messages_pipelined_into_one_read_all_arrive() {
+        // Three small messages written back to back usually land in a single
+        // read. The buffered parse path has to yield all three rather than
+        // dropping the tail of the buffer.
+        exchange(
+            |mut server| {
+                nagoya::block_on(async move {
+                    for expected in ["one", "two", "three"] {
+                        let message = server.read().await.expect("read").expect("a message");
+                        assert_eq!(message, Message::Text(Bytes::copy_from_slice(expected.as_bytes())));
+                    }
+                });
+            },
+            |mut client| {
+                nagoya::block_on(async move {
+                    for text in ["one", "two", "three"] {
+                        client
+                            .write(Message::Text(Bytes::copy_from_slice(text.as_bytes())))
+                            .await
+                            .expect("write");
+                    }
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn a_ping_is_answered_with_the_same_payload() {
+        exchange(
+            |mut server| {
+                nagoya::block_on(async move {
+                    let message = server.read().await.expect("read").expect("a message");
+                    let Message::Ping(payload) = message else {
+                        panic!("expected a ping");
+                    };
+                    server.pong(payload).await.expect("pong");
+                });
+            },
+            |mut client| {
+                nagoya::block_on(async move {
+                    client
+                        .write(Message::Ping(Bytes::from_static(b"probe")))
+                        .await
+                        .expect("write");
+                    let reply = client.read().await.expect("read").expect("a message");
+                    assert_eq!(reply, Message::Pong(Bytes::from_static(b"probe")));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn a_close_handshake_ends_the_stream_cleanly() {
+        exchange(
+            |mut server| {
+                nagoya::block_on(async move {
+                    let message = server.read().await.expect("read").expect("a message");
+                    assert_eq!(
+                        message,
+                        Message::Close(Some(CloseFrame {
+                            code: CloseCode::NORMAL,
+                            reason: Bytes::from_static(b"done"),
+                        }))
+                    );
+                    server.close(None).await.expect("close");
+                    // After a close in both directions the stream ends, and
+                    // that is a clean end rather than an error.
+                    assert_eq!(server.read().await.expect("read"), None);
+                });
+            },
+            |mut client| {
+                nagoya::block_on(async move {
+                    client
+                        .close(Some(CloseFrame {
+                            code: CloseCode::NORMAL,
+                            reason: Bytes::from_static(b"done"),
+                        }))
+                        .await
+                        .expect("close");
+                    let _ = client.read().await;
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn a_server_rejects_an_unmasked_client_frame() {
+        // The client half deliberately writes an unmasked frame, which is what
+        // a broken or hostile client does. RFC 6455 says the server must fail
+        // the connection rather than accept it.
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+        let listener = TcpListener::bind(local(), &handle).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client = std::thread::spawn(move || {
+            use std::io::Write as _;
+            let mut raw = std::net::TcpStream::connect(addr).expect("connect");
+            // FIN + text, length 2, no mask bit.
+            raw.write_all(&[0x81, 0x02, b'h', b'i']).expect("write");
+            // Hold the connection open so the server sees the frame, not an EOF.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+
+        nagoya::block_on(async {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut server = Connection::new(stream, Role::Server, Limits::default());
+            match server.read().await {
+                Err(Error::MaskingViolation) => {}
+                other => panic!("expected a masking violation, got {other:?}"),
+            }
+        });
+
+        client.join().expect("client thread");
+    }
+
+    #[test]
+    fn a_client_masks_every_frame_it_sends() {
+        // Read the raw bytes a client produces and confirm the mask bit is set
+        // and the payload is not on the wire in cleartext.
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+        let listener = std::net::TcpListener::bind(local()).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client_handle = handle.clone();
+        let client = std::thread::spawn(move || {
+            nagoya::block_on(async move {
+                let stream =
+                    crate::reactor::TcpStream::connect(addr, &client_handle).expect("connect");
+                let mut client = Connection::new(stream, Role::Client, Limits::default());
+                client
+                    .write(Message::Text(Bytes::from_static(b"secret")))
+                    .await
+                    .expect("write");
+            });
+        });
+
+        use std::io::Read as _;
+        let (mut raw, _) = listener.accept().expect("accept");
+        let mut buffer = [0u8; 64];
+        let read = raw.read(&mut buffer).expect("read");
+        let frame = &buffer[..read];
+
+        assert_eq!(frame[0], 0x81, "not a final text frame");
+        assert_eq!(frame[1] & 0x80, 0x80, "client did not set the mask bit");
+        assert_eq!(frame[1] & 0x7F, 6, "wrong payload length");
+        assert!(
+            !frame[6..].windows(6).any(|window| window == b"secret"),
+            "payload went out unmasked"
+        );
+
+        client.join().expect("client thread");
+    }
+
+    #[test]
+    fn successive_frames_use_different_masking_keys() {
+        // A fixed key would let a peer predict the keystream, which is the
+        // thing masking exists to prevent.
+        let reactor = Reactor::start().expect("reactor");
+        let handle = reactor.handle();
+        let listener = std::net::TcpListener::bind(local()).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client_handle = handle.clone();
+        let client = std::thread::spawn(move || {
+            nagoya::block_on(async move {
+                let stream =
+                    crate::reactor::TcpStream::connect(addr, &client_handle).expect("connect");
+                let mut client = Connection::new(stream, Role::Client, Limits::default());
+                for _ in 0..4 {
+                    client
+                        .write(Message::Text(Bytes::from_static(b"x")))
+                        .await
+                        .expect("write");
+                }
+            });
+        });
+
+        use std::io::Read as _;
+        let (mut raw, _) = listener.accept().expect("accept");
+        let mut buffer = alloc::vec![0u8; 256];
+        let mut total = 0usize;
+        // Four frames of 2 header + 4 mask + 1 payload.
+        while total < 4 * 7 {
+            let read = raw.read(&mut buffer[total..]).expect("read");
+            if read == 0 {
+                break;
+            }
+            total += read;
+        }
+
+        let keys: alloc::vec::Vec<[u8; 4]> = (0..4)
+            .map(|i| {
+                let start = i * 7 + 2;
+                [
+                    buffer[start],
+                    buffer[start + 1],
+                    buffer[start + 2],
+                    buffer[start + 3],
+                ]
+            })
+            .collect();
+
+        assert!(
+            keys.windows(2).any(|pair| pair[0] != pair[1]),
+            "every frame used the same masking key: {keys:?}"
+        );
+
+        client.join().expect("client thread");
+    }
+}

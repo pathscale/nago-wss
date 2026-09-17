@@ -45,3 +45,7 @@ pub use proto::{CloseCode, FrameError, Header, OpCode};
 /// The I/O side. See the module for why the reactor lives here.
 #[cfg(feature = "reactor")]
 pub mod reactor;
+
+/// A live WebSocket connection, where the protocol meets the reactor.
+#[cfg(feature = "reactor")]
+pub mod conn;
