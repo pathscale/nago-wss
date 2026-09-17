@@ -199,8 +199,8 @@ each was withdrawn after measurement:
 - Worker pool parking. A profile suggested it; an exact counter refuted it,
   reporting zero spurious wakes at every pool size.
 
-`benches/floor.rs` and `examples/worker_sweep.rs` carry the full list of what
-has been ruled out, with the numbers.
+`benches/floor.rs` carries the full list of what has been ruled out, with the
+numbers.
 
 ## Status
 
