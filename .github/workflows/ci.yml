@@ -38,3 +38,46 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo test --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  autobahn:
+    name: Autobahn
+    # GitHub hosted rather than ubicloud, because this job needs the Docker
+    # daemon and the image the suite ships as.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone the sibling path dependencies
+        run: |
+          git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
+          git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --example autobahn_server
+      - name: Start the echo server
+        run: |
+          nohup ./target/release/examples/autobahn_server > autobahn-server.log 2>&1 &
+          # The suite gives up rather than retries, so wait for the port.
+          for _ in $(seq 1 30); do
+            if nc -z 127.0.0.1 9001; then exit 0; fi
+            sleep 1
+          done
+          echo "the echo server never came up"
+          exit 1
+      - name: Run the suite
+        run: |
+          mkdir -p autobahn/reports
+          docker run --rm --network host \
+            -v "$PWD/autobahn:/config" \
+            crossbario/autobahn-testsuite \
+            wstest --mode fuzzingclient --spec /config/fuzzingclient.json
+          sudo chown -R "$(id -u):$(id -g)" autobahn/reports
+      - name: Check the report
+        run: python3 autobahn/check.py autobahn/reports/servers/index.json
+      - name: Show what the server logged
+        if: failure()
+        run: cat autobahn-server.log
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-report
+          path: autobahn/reports/servers/

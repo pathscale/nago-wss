@@ -84,6 +84,30 @@ pub enum Error {
     Url(&'static str),
 }
 
+impl Error {
+    /// The close code this failure should be reported to the peer with.
+    ///
+    /// §7.4.1 gives each class of failure a code, and a peer that gets the
+    /// right one learns what it did wrong rather than just finding the socket
+    /// gone. This is the mapping, in one place, so a server does not have to
+    /// invent it: anything that broke the protocol is 1002, a payload that was
+    /// the wrong shape for its opcode is 1007, and something simply too big is
+    /// 1009.
+    ///
+    /// `None` means there is no one left to tell: the transport failed, the
+    /// peer vanished, or the connection was never established.
+    pub fn close_code(&self) -> Option<CloseCode> {
+        match self {
+            Self::Frame(FrameError::TooLarge) => Some(CloseCode::TOO_LARGE),
+            Self::Frame(_) | Self::MaskingViolation => Some(CloseCode::PROTOCOL),
+            Self::Protocol(ProtocolError::InvalidUtf8) => Some(CloseCode::INVALID_PAYLOAD),
+            Self::Protocol(ProtocolError::MessageTooLarge) => Some(CloseCode::TOO_LARGE),
+            Self::Protocol(_) => Some(CloseCode::PROTOCOL),
+            Self::Io(_) | Self::UnexpectedEof | Self::Upgrade(_) | Self::Url(_) => None,
+        }
+    }
+}
+
 impl From<Errno> for Error {
     fn from(value: Errno) -> Self {
         Self::Io(value)
@@ -411,6 +435,83 @@ fn encode_close_body(frame: Option<CloseFrame>) -> Bytes {
 mod tests {
     use super::*;
     use crate::reactor::{Reactor, TcpListener};
+
+    #[test]
+    fn every_failure_reports_the_code_the_rfc_gives_it() {
+        // §7.4.1. Getting one of these wrong tells a peer the wrong thing
+        // about what it did, which is worse than saying nothing.
+        let cases: &[(Error, Option<CloseCode>)] = &[
+            (
+                Error::Frame(FrameError::ReservedBitSet),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Frame(FrameError::ReservedOpCode(0x3)),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Frame(FrameError::InvalidControlFrame),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Frame(FrameError::InvalidLength),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Frame(FrameError::TooLarge),
+                Some(CloseCode::TOO_LARGE),
+            ),
+            (Error::MaskingViolation, Some(CloseCode::PROTOCOL)),
+            (
+                Error::Protocol(ProtocolError::UnexpectedContinuation),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Protocol(ProtocolError::InterleavedDataFrame),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Protocol(ProtocolError::MalformedCloseFrame),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Protocol(ProtocolError::InvalidCloseCode),
+                Some(CloseCode::PROTOCOL),
+            ),
+            (
+                Error::Protocol(ProtocolError::InvalidUtf8),
+                Some(CloseCode::INVALID_PAYLOAD),
+            ),
+            (
+                Error::Protocol(ProtocolError::MessageTooLarge),
+                Some(CloseCode::TOO_LARGE),
+            ),
+            // Nobody left to tell.
+            (Error::UnexpectedEof, None),
+            (Error::Url("bad scheme"), None),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                error.close_code(),
+                *expected,
+                "{error} reported the wrong close code"
+            );
+        }
+    }
+
+    /// Whatever code is reported must itself be legal to put on the wire,
+    /// or reporting it is a second protocol violation.
+    #[test]
+    fn a_reported_close_code_may_actually_be_sent() {
+        for code in [
+            CloseCode::PROTOCOL,
+            CloseCode::INVALID_PAYLOAD,
+            CloseCode::TOO_LARGE,
+        ] {
+            assert!(code.is_sendable(), "{code:?} cannot be sent");
+        }
+    }
     /// Port zero: the kernel picks a free one, which `local_addr` reports.
     fn local() -> Addr {
         Addr::localhost(0)

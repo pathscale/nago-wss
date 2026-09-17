@@ -19,8 +19,9 @@
 //! then point the suite at `ws://127.0.0.1:9001`. `autobahn/README.md` has the
 //! Docker line.
 
+use bytes::Bytes;
 use nago_wss::conn::Error;
-use nago_wss::proto::message::{Limits, Message};
+use nago_wss::proto::message::{CloseFrame, Limits, Message};
 use nago_wss::reactor::socket::Addr;
 use nago_wss::reactor::{Reactor, TcpListener};
 
@@ -64,9 +65,27 @@ async fn serve(stream: nago_wss::reactor::TcpStream) -> Result<(), Error> {
     let (mut conn, _) = nago_wss::upgrade::accept(stream, limits, |_| None).await?;
 
     loop {
-        let Some(message) = conn.read().await? else {
-            return Ok(());
+        let message = match conn.read().await {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(()),
+            // Most of the suite ends here. A case that sends a bad frame is
+            // checking two things: that the connection fails, and that it
+            // fails with the code §7.4.1 gives that failure. Dropping the
+            // socket would get the first right and the second wrong, so the
+            // code goes out before the connection does.
+            Err(error) => {
+                if let Some(code) = error.close_code() {
+                    let _ = conn
+                        .close(Some(CloseFrame {
+                            code,
+                            reason: Bytes::new(),
+                        }))
+                        .await;
+                }
+                return Err(error);
+            }
         };
+
         match message {
             // Echoed back unchanged, which is what every data case checks.
             Message::Text(_) | Message::Binary(_) => conn.write(message).await?,
