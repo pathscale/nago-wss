@@ -36,20 +36,24 @@ simd-utf8 = ["dep:simdutf8"]
 webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 
 [dependencies]
-# SIMD UTF-8 validation, taken with its own defaults.
+# SIMD UTF-8 validation. A feature because the protocol core forbids `unsafe`
+# and this crate does not: a consumer with that policy turns it off and gets
+# the standard library's validator. Measured over the same 16 KiB buffers,
+# 57.37 GB/s against 115.84 on ASCII and 2.56 GB/s against 13.49 on mixed
+# text, which is why it is on by default.
 #
-# `simd-utf8` is in this crate's default feature set, and `std` is too, so
-# there is nothing to gain by declaring `default-features = false` here: it
-# turns off `std` on a dependency that is only ever pulled in by a build that
-# already has it. It said one thing and the build did another, which is worse
-# than not saying it.
+# `default-features = false` turns off `std` and nothing else, and it is load
+# bearing: `simdutf8` is `#![cfg_attr(not(feature = "std"), no_std)]`, and
+# `simd-utf8` here does not require `std` either, so a `no_std` consumer can
+# have the vector paths. Taking the defaults would hand that consumer `std`
+# through the back door and break the thing this crate is for.
 #
-# It stays a feature because the protocol core forbids `unsafe` and this crate
-# does not. A consumer with that policy uses `default-features = false` on
-# `nago-wss` and gets the standard library's validator instead. Measured over
-# the same 16 KiB buffers: 57.37 GB/s against 115.84 on ASCII, and 2.56 GB/s
-# against 13.49 on mixed text, which is why the default points the way it does.
-simdutf8 = { version = "0.1", optional = true }
+# It does not cost the SIMD. `std` is the only default `simdutf8` has, and the
+# vector paths are not behind a feature at all: runtime detected on x86, and
+# the aarch64 module is `#[cfg(target_arch = "aarch64")]` with no feature gate.
+# Turning defaults off wholesale is the mistake that looks identical to this
+# and is not, because on other crates it does take the SIMD with it.
+simdutf8 = { version = "0.1", default-features = false, optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
