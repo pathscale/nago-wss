@@ -117,16 +117,6 @@ fn case_2_5_a_fragmented_ping_is_a_protocol_error() {
     );
 }
 
-#[test]
-fn case_2_6_a_control_frame_over_125_bytes_is_a_protocol_error() {
-    let mut a = assembler();
-    let payload = vec![b'x'; 126];
-    assert_eq!(
-        feed(&mut a, &frame(OpCode::Ping, true, &payload)),
-        Err(Fault::Frame(FrameError::InvalidControlFrame))
-    );
-}
-
 // --- 3.x and 4.x  reserved bits and opcodes -------------------------------
 
 #[test]
@@ -170,43 +160,6 @@ fn case_5_1_a_fragmented_message_reassembles() {
         .unwrap()
         .unwrap();
     assert_eq!(message, Message::Text(Bytes::from_static(b"fragment")));
-}
-
-#[test]
-fn case_5_6_a_ping_may_interleave_with_fragments() {
-    let mut a = assembler();
-    a.accept(OpCode::Text, false, Bytes::from_static(b"frag"))
-        .unwrap();
-
-    let ping = feed(&mut a, &frame(OpCode::Ping, true, b"mid"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(ping, Message::Ping(Bytes::from_static(b"mid")));
-
-    let message = feed(&mut a, &frame(OpCode::Continuation, true, b"ment"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(message, Message::Text(Bytes::from_static(b"fragment")));
-}
-
-#[test]
-fn case_5_9_a_continuation_with_nothing_open_is_a_protocol_error() {
-    let mut a = assembler();
-    assert_eq!(
-        feed(&mut a, &frame(OpCode::Continuation, true, b"orphan")),
-        Err(Fault::Protocol(ProtocolError::UnexpectedContinuation))
-    );
-}
-
-#[test]
-fn case_5_11_a_new_data_frame_during_a_fragment_is_a_protocol_error() {
-    let mut a = assembler();
-    a.accept(OpCode::Text, false, Bytes::from_static(b"open"))
-        .unwrap();
-    assert_eq!(
-        feed(&mut a, &frame(OpCode::Text, true, b"other")),
-        Err(Fault::Protocol(ProtocolError::InterleavedDataFrame))
-    );
 }
 
 // --- 6.x  UTF-8 -----------------------------------------------------------
@@ -316,39 +269,7 @@ fn case_7_5_1_a_close_reason_must_be_utf8() {
     );
 }
 
-#[test]
-fn case_7_9_reserved_close_codes_are_refused() {
-    for code in [999u16, 1004, 1005, 1006, 1015, 1016, 2000] {
-        let mut a = assembler();
-        let body = code.to_be_bytes().to_vec();
-        assert_eq!(
-            feed(&mut a, &frame(OpCode::Close, true, &body)),
-            Err(Fault::Protocol(ProtocolError::InvalidCloseCode)),
-            "accepted reserved close code {code}"
-        );
-    }
-}
-
-#[test]
-fn case_7_9_application_close_codes_are_accepted() {
-    for code in [3000u16, 3999, 4000, 4999] {
-        let mut a = assembler();
-        let body = code.to_be_bytes().to_vec();
-        let message = feed(&mut a, &frame(OpCode::Close, true, &body))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            message,
-            Message::Close(Some(CloseFrame {
-                code: CloseCode(code),
-                reason: Bytes::new(),
-            })),
-            "refused application close code {code}"
-        );
-    }
-}
-
-// --- length encoding ------------------------------------------------------
+// --- length encoding, which Autobahn folds into 1.x ----------------------
 
 #[test]
 fn non_minimal_lengths_are_refused() {
@@ -388,28 +309,7 @@ fn a_message_reassembled_past_the_limit_is_refused() {
     );
 }
 
-// --- 1.x  the length boundaries ------------------------------------------
-
-#[test]
-fn case_1_1_x_every_length_encoding_round_trips() {
-    // Autobahn walks these sizes because each one crosses a boundary in the
-    // length field: 125 is the last 7-bit value, 126 forces the 16-bit form,
-    // and 65536 forces the 64-bit form.
-    for size in [0usize, 1, 125, 126, 127, 65535, 65536] {
-        let payload = vec![0x5Au8; size];
-        let mut a = assembler();
-        let message = feed(&mut a, &frame(OpCode::Binary, true, &payload))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            message,
-            Message::Binary(Bytes::from(payload)),
-            "length {size} did not round trip"
-        );
-    }
-}
-
-// --- 5.x  more fragmentation ---------------------------------------------
+// --- 5.x  fragmentation, the awkward shapes -------------------------------
 
 #[test]
 fn case_5_2_a_message_in_many_small_fragments_reassembles() {
@@ -552,7 +452,7 @@ fn case_6_14_an_invalid_sequence_split_across_fragments_is_still_refused() {
     );
 }
 
-// --- 7.x  more closing ---------------------------------------------------
+// --- 7.x  closing, the body shapes ----------------------------------------
 
 #[test]
 fn case_7_3_x_a_close_reason_may_be_any_valid_utf8() {
@@ -596,7 +496,7 @@ fn a_close_frame_is_at_most_125_bytes() {
     // It is a control frame, so the reason has 123 bytes after the code.
     let mut a = assembler();
     let mut body = 1000u16.to_be_bytes().to_vec();
-    body.extend_from_slice(&vec![b'x'; 124]);
+    body.extend_from_slice(&[b'x'; 124]);
     assert_eq!(
         feed(&mut a, &frame(OpCode::Close, true, &body)),
         Err(Fault::Frame(FrameError::InvalidControlFrame))
@@ -636,6 +536,13 @@ fn case_9_x_large_messages_survive_fragmentation() {
         "a large fragmented message did not reassemble intact"
     );
 }
+
+// ==========================================================================
+// Everything above is one case written out. Everything below is a section
+// generated from the rule that defines it, which is how the large sections
+// are covered: transcribing a hundred and forty five UTF-8 cases would say
+// less than the table they all come from.
+// ==========================================================================
 
 // --- 6.x in bulk ---------------------------------------------------------
 //
@@ -788,4 +695,474 @@ fn every_valid_codepoint_class_passes_where_the_bad_ones_fail() {
             "refused {name}, which is valid"
         );
     }
+}
+
+// --- 1.x in bulk ----------------------------------------------------------
+//
+// Autobahn's 1.1.1 through 1.2.8 are one question asked sixteen times: does a
+// payload of size N survive, as text and as binary, whole and in fragments.
+// The sizes are the ones that cross a boundary in the length field, plus the
+// fragment size Autobahn itself uses.
+
+/// The payload sizes Autobahn's section 1 walks.
+///
+/// 125 is the last length the 7-bit field can hold, 126 is the first that
+/// forces the 16-bit form, 65535 is the last that fits it and 65536 the first
+/// that forces the 64-bit form. 0 and 1 are there because an empty frame is
+/// legal and a one-byte one exercises no encoding at all.
+const SECTION_1_SIZES: &[usize] = &[0, 1, 125, 126, 127, 128, 65535, 65536];
+
+/// Autobahn fragments its large section 1 payloads at this size.
+const AUTOBAHN_FRAGMENT: usize = 4096;
+
+/// A payload of `size` bytes that is valid UTF-8, so the same body can be sent
+/// as text or as binary and the text path is actually exercised rather than
+/// skipped over ASCII.
+fn payload_of(size: usize) -> Vec<u8> {
+    // Repeating "Hello" keeps it readable in a failure and keeps every byte
+    // ASCII, which text requires and binary does not care about.
+    b"Hello, world! ".iter().copied().cycle().take(size).collect()
+}
+
+fn expect_message(kind: OpCode, payload: Vec<u8>) -> Message {
+    match kind {
+        OpCode::Text => Message::Text(Bytes::from(payload)),
+        OpCode::Binary => Message::Binary(Bytes::from(payload)),
+        _ => unreachable!("section 1 is data frames only"),
+    }
+}
+
+#[test]
+fn case_1_1_1_to_1_2_8_every_size_survives_whole() {
+    for kind in [OpCode::Text, OpCode::Binary] {
+        for &size in SECTION_1_SIZES {
+            let payload = payload_of(size);
+            let mut a = assembler();
+            let message = feed(&mut a, &frame(kind, true, &payload))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{kind:?} of {size} bytes completed nothing"));
+            assert_eq!(
+                message,
+                expect_message(kind, payload),
+                "{kind:?} of {size} bytes did not round trip whole"
+            );
+        }
+    }
+}
+
+#[test]
+fn case_1_1_1_to_1_2_8_every_size_survives_fragmentation() {
+    for kind in [OpCode::Text, OpCode::Binary] {
+        for &size in SECTION_1_SIZES {
+            let payload = payload_of(size);
+            let mut a = assembler();
+
+            // An empty payload has no chunks at all, so it is sent as a single
+            // non-final frame closed by an empty continuation: still two
+            // frames, still one message, which is what the case asks.
+            let chunks: Vec<&[u8]> = if payload.is_empty() {
+                vec![&[]]
+            } else {
+                payload.chunks(AUTOBAHN_FRAGMENT).collect()
+            };
+
+            let mut delivered = None;
+            for (index, chunk) in chunks.iter().enumerate() {
+                let first = index == 0;
+                let last = index == chunks.len() - 1;
+                let opcode = if first { kind } else { OpCode::Continuation };
+                let result = feed(&mut a, &frame(opcode, last, chunk)).unwrap();
+                if last {
+                    delivered = result;
+                } else {
+                    assert!(
+                        result.is_none(),
+                        "{kind:?} of {size} bytes completed at fragment {index}"
+                    );
+                }
+            }
+
+            assert_eq!(
+                delivered.unwrap_or_else(|| panic!("{kind:?} of {size} bytes never completed")),
+                expect_message(kind, payload),
+                "{kind:?} of {size} bytes did not round trip in fragments"
+            );
+        }
+    }
+}
+
+// --- 2.x in bulk ----------------------------------------------------------
+//
+// Section 2 is about control frames: what a ping may carry, and what an
+// endpoint does with pongs it never asked for.
+
+#[test]
+fn case_2_3_and_2_4_a_ping_may_carry_the_full_125_bytes() {
+    // 125 is the whole control frame budget, so this is the largest legal
+    // ping, and the one either side of the boundary decides the case.
+    for size in [0usize, 1, 124, 125] {
+        let payload = vec![0xA5u8; size];
+        let mut a = assembler();
+        let message = feed(&mut a, &frame(OpCode::Ping, true, &payload))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Ping(Bytes::from(payload)),
+            "a {size} byte ping did not survive"
+        );
+    }
+}
+
+#[test]
+fn case_2_5_a_ping_over_125_bytes_is_refused() {
+    for size in [126usize, 127, 1024] {
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Ping, true, &vec![0u8; size])),
+            Err(Fault::Frame(FrameError::InvalidControlFrame)),
+            "accepted a {size} byte ping"
+        );
+    }
+}
+
+#[test]
+fn case_2_6_a_ping_payload_may_be_arbitrary_bytes() {
+    // A ping is not text, so it carries the bytes a text frame would refuse
+    // and they must come back exactly as sent.
+    let payload: Vec<u8> = (0u8..=255).collect();
+    let payload = payload[..125].to_vec();
+    let mut a = assembler();
+    let message = feed(&mut a, &frame(OpCode::Ping, true, &payload))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Ping(Bytes::from(payload)));
+}
+
+#[test]
+fn case_2_7_an_unsolicited_pong_is_accepted_and_answers_nothing() {
+    // §5.5.3: an unsolicited pong is a unidirectional heartbeat and is legal.
+    // It is delivered so the application may see it; it is not an error and
+    // nothing is owed in reply.
+    let mut a = assembler();
+    let message = feed(&mut a, &frame(OpCode::Pong, true, b"unsolicited"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Pong(Bytes::from_static(b"unsolicited")));
+}
+
+#[test]
+fn case_2_8_an_unsolicited_pong_does_not_disturb_a_later_ping() {
+    let mut a = assembler();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Pong, true, b"first")).unwrap(),
+        Some(Message::Pong(Bytes::from_static(b"first")))
+    );
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Ping, true, b"second")).unwrap(),
+        Some(Message::Ping(Bytes::from_static(b"second")))
+    );
+}
+
+#[test]
+fn case_2_10_and_2_11_pings_arrive_in_order() {
+    // Ten pings back to back. Each must surface separately and in the order
+    // sent, because the pongs owed for them are only correct in that order.
+    let mut a = assembler();
+    for index in 0..10u8 {
+        let payload = [index];
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Ping, true, &payload)).unwrap(),
+            Some(Message::Ping(Bytes::copy_from_slice(&payload))),
+            "ping {index} came back out of order or not at all"
+        );
+    }
+}
+
+// --- 5.x in bulk ----------------------------------------------------------
+//
+// Section 5 is fragmentation sequencing. The rule is short: fragments of one
+// message may be interleaved with control frames and with nothing else, and a
+// continuation only means something while a message is open. Most of the
+// section is that rule tested at every position a frame can occupy.
+
+#[test]
+fn case_5_6_to_5_20_a_control_frame_may_sit_at_any_fragment_boundary() {
+    // Autobahn places a ping between the first and second fragment, then
+    // between the second and third, and so on. Rather than fixing a position,
+    // walk every one of them: a four fragment message has three boundaries,
+    // and the message must reassemble identically whichever one is used.
+    let fragments: &[&[u8]] = &[b"frag", b"ment", b"ed m", b"essage"];
+    let joined: Vec<u8> = fragments.concat();
+
+    for boundary in 0..fragments.len() - 1 {
+        let mut a = assembler();
+        let mut delivered = None;
+
+        for (index, fragment) in fragments.iter().enumerate() {
+            let opcode = if index == 0 {
+                OpCode::Text
+            } else {
+                OpCode::Continuation
+            };
+            let last = index == fragments.len() - 1;
+            let result = feed(&mut a, &frame(opcode, last, fragment)).unwrap();
+            if last {
+                delivered = result;
+            } else {
+                assert!(result.is_none(), "fragment {index} completed a message");
+            }
+
+            if index == boundary {
+                // A ping here must surface on its own and leave the partial
+                // message exactly as it was.
+                let probe = feed(&mut a, &frame(OpCode::Ping, true, b"probe"))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(probe, Message::Ping(Bytes::from_static(b"probe")));
+            }
+        }
+
+        assert_eq!(
+            delivered.unwrap(),
+            Message::Text(Bytes::from(joined.clone())),
+            "a ping after fragment {boundary} disturbed reassembly"
+        );
+    }
+}
+
+#[test]
+fn case_5_6_to_5_20_several_control_frames_may_sit_at_one_boundary() {
+    // Nothing limits a peer to one control frame between fragments.
+    let mut a = assembler();
+    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+
+    for opcode in [OpCode::Ping, OpCode::Pong, OpCode::Ping] {
+        let message = feed(&mut a, &frame(opcode, true, b"x")).unwrap().unwrap();
+        let expected = match opcode {
+            OpCode::Ping => Message::Ping(Bytes::from_static(b"x")),
+            OpCode::Pong => Message::Pong(Bytes::from_static(b"x")),
+            _ => unreachable!("only ping and pong are sent here"),
+        };
+        assert_eq!(message, expected);
+    }
+
+    let done = feed(&mut a, &frame(OpCode::Continuation, true, b"b"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(done, Message::Text(Bytes::from_static(b"ab")));
+}
+
+#[test]
+fn case_5_15_a_continuation_after_a_completed_message_is_a_protocol_error() {
+    // The message ended with the FIN fragment, so the next continuation has
+    // nothing to continue. This is the failure a naive implementation misses,
+    // because it never cleared the state the last FIN should have cleared.
+    let mut a = assembler();
+    assert_eq!(feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(), None);
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Continuation, true, b"b")).unwrap(),
+        Some(Message::Text(Bytes::from_static(b"ab")))
+    );
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Continuation, true, b"c")),
+        Err(Fault::Protocol(ProtocolError::UnexpectedContinuation))
+    );
+}
+
+#[test]
+fn case_5_16_to_5_17_a_continuation_before_anything_is_a_protocol_error() {
+    // Both the final and the non-final form, since an implementation that
+    // checks only one of them passes half the section.
+    for fin in [true, false] {
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Continuation, fin, b"x")),
+            Err(Fault::Protocol(ProtocolError::UnexpectedContinuation)),
+            "accepted a continuation with fin={fin} and nothing open"
+        );
+    }
+}
+
+#[test]
+fn case_5_18_to_5_20_a_data_frame_during_a_fragment_is_a_protocol_error() {
+    // Every combination: the open message is text or binary, the interloper is
+    // text or binary, final or not. All four by four are the same violation.
+    for open in [OpCode::Text, OpCode::Binary] {
+        for interloper in [OpCode::Text, OpCode::Binary] {
+            for fin in [true, false] {
+                let mut a = assembler();
+                assert_eq!(feed(&mut a, &frame(open, false, b"a")).unwrap(), None);
+                assert_eq!(
+                    feed(&mut a, &frame(interloper, fin, b"b")),
+                    Err(Fault::Protocol(ProtocolError::InterleavedDataFrame)),
+                    "accepted {interloper:?} (fin={fin}) inside an open {open:?}"
+                );
+            }
+        }
+    }
+}
+
+// --- 7.x in bulk ----------------------------------------------------------
+//
+// Section 7 is the closing handshake: which close bodies parse, which codes
+// may appear on the wire, and what happens to anything sent afterwards.
+
+#[test]
+fn case_7_3_x_a_close_body_may_be_empty_a_code_or_a_code_and_reason() {
+    // The four legal shapes, by length: nothing, the code alone, the code with
+    // a reason, and the code with the largest reason a control frame holds.
+    let cases: &[(&str, usize)] = &[
+        ("code alone", 0),
+        ("short reason", 5),
+        ("largest reason", 123),
+    ];
+
+    let mut a = assembler();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Close, true, b"")).unwrap(),
+        Some(Message::Close(None)),
+        "an empty close body means no status given and is legal"
+    );
+
+    for (name, reason_len) in cases {
+        let reason = vec![b'y'; *reason_len];
+        let mut body = 1000u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&reason);
+
+        let mut a = assembler();
+        let message = feed(&mut a, &frame(OpCode::Close, true, &body))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message,
+            Message::Close(Some(CloseFrame {
+                code: CloseCode::NORMAL,
+                reason: Bytes::from(reason),
+            })),
+            "the {name} form did not parse"
+        );
+    }
+}
+
+#[test]
+fn case_7_7_and_7_9_the_registry_decides_every_code() {
+    // The whole u16 space, judged by the rule rather than by a list: 1000-1003
+    // and 1007-1011 are the protocol's own, 3000-3999 are registered by
+    // libraries and 4000-4999 are private. Everything else, including the
+    // codes an application may observe but must never send (1005, 1006, 1015),
+    // is a violation when it appears on the wire.
+    let sendable = |code: u16| {
+        matches!(code, 1000..=1003 | 1007..=1011 | 3000..=3999 | 4000..=4999)
+    };
+
+    // Every code near a boundary, plus the ones Autobahn names explicitly.
+    let interesting: Vec<u16> = (0u16..=1020)
+        .chain([1100, 2000, 2999, 3000, 3001, 3999, 4000, 4001, 4999, 5000, 65535])
+        .collect();
+
+    for code in interesting {
+        let mut a = assembler();
+        let body = code.to_be_bytes().to_vec();
+        let result = feed(&mut a, &frame(OpCode::Close, true, &body));
+
+        if sendable(code) {
+            assert_eq!(
+                result,
+                Ok(Some(Message::Close(Some(CloseFrame {
+                    code: CloseCode(code),
+                    reason: Bytes::new(),
+                })))),
+                "refused close code {code}, which may be sent"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(Fault::Protocol(ProtocolError::InvalidCloseCode)),
+                "accepted close code {code}, which must never be sent"
+            );
+        }
+    }
+}
+
+#[test]
+fn case_7_9_x_a_code_is_judged_before_its_reason() {
+    // An illegal code with a perfectly good reason is still illegal: the code
+    // must be checked before the reason is looked at, or a peer can smuggle
+    // one past by attaching something valid to it.
+    for code in [0u16, 999, 1004, 1005, 1006, 1015, 1016, 2000, 5000] {
+        let mut a = assembler();
+        let mut body = code.to_be_bytes().to_vec();
+        body.extend_from_slice(b"a perfectly good reason");
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Close, true, &body)),
+            Err(Fault::Protocol(ProtocolError::InvalidCloseCode)),
+            "accepted close code {code} because its reason was valid"
+        );
+    }
+}
+
+#[test]
+fn case_7_1_2_a_second_close_is_discarded() {
+    // §5.5.1: the connection is closing from the first one. Acting on the
+    // second would mean answering a peer that has already said goodbye.
+    let mut a = assembler();
+    let first = feed(&mut a, &frame(OpCode::Close, true, &1000u16.to_be_bytes()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first,
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::NORMAL,
+            reason: Bytes::new(),
+        }))
+    );
+    assert!(a.is_closed());
+
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Close, true, &1001u16.to_be_bytes())).unwrap(),
+        None,
+        "a second close was delivered"
+    );
+}
+
+#[test]
+fn case_7_1_3_to_7_1_5_anything_after_a_close_is_discarded() {
+    // A ping after a close must not draw a pong, and a message after a close
+    // must not be echoed. Both follow from the same rule, so both are checked
+    // the same way: the frame parses, and nothing comes out.
+    let after: &[(&str, OpCode)] = &[
+        ("a ping", OpCode::Ping),
+        ("a pong", OpCode::Pong),
+        ("a text message", OpCode::Text),
+        ("a binary message", OpCode::Binary),
+    ];
+
+    for (name, opcode) in after {
+        let mut a = assembler();
+        feed(&mut a, &frame(OpCode::Close, true, &1000u16.to_be_bytes())).unwrap();
+        assert_eq!(
+            feed(&mut a, &frame(*opcode, true, b"ignored")).unwrap(),
+            None,
+            "{name} was delivered after a close"
+        );
+    }
+}
+
+#[test]
+fn case_7_1_5_a_close_abandons_a_fragmented_message() {
+    // The message was half sent when the close arrived. It never completes,
+    // and the continuation that would have completed it is discarded rather
+    // than reassembled into a message delivered after the goodbye.
+    let mut a = assembler();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"half")).unwrap(),
+        None
+    );
+    feed(&mut a, &frame(OpCode::Close, true, &1000u16.to_be_bytes())).unwrap();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Continuation, true, b" sent")).unwrap(),
+        None,
+        "a fragmented message completed after a close"
+    );
 }

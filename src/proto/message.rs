@@ -144,13 +144,23 @@ impl Assembler {
     /// Feed one decoded frame and its (already unmasked) payload.
     ///
     /// Returns `Some` when the frame completed a message. A non-final fragment
-    /// returns `None` with the bytes retained.
+    /// returns `None` with the bytes retained, and so does any frame that
+    /// arrives after a close has been received, which is discarded.
     pub fn accept(
         &mut self,
         opcode: OpCode,
         fin: bool,
         payload: Bytes,
     ) -> Result<Option<Message>, ProtocolError> {
+        // §5.5.1: once a close has been received the connection is closing and
+        // anything still on the wire is no longer meaningful. Discarding rather
+        // than delivering is what keeps a peer from being answered after it
+        // said goodbye: no pong to a ping that followed a close, no echo of a
+        // message that did, no second close acted on.
+        if self.closed {
+            return Ok(None);
+        }
+
         // Control frames never fragment and never join the partial message, so
         // they are handled before any reassembly state is touched. The frame
         // codec has already rejected a fragmented or oversized control frame.

@@ -142,16 +142,24 @@ The reactor:
 
 The connection joins the two, enforcing the masking rules in both directions.
 
-Conformance: 38 cases from RFC 6455 run under `cargo test`, covering
-fragmentation and its interleaving rules, reserved bits and opcodes, control
-frame limits, the close code registry, every length encoding boundary, the
-first and last codepoint of each UTF-8 width, truncated and overlong
-sequences, and a quarter megabyte message reassembled from fragments.
+Conformance: 55 tests run under `cargo test`, covering Autobahn's sections 1
+through 7 and the shape of 9. Fragmentation and its interleaving rules,
+reserved bits and opcodes, control frame limits, the close code registry over
+the whole u16 space, every length encoding boundary as text and as binary and
+whole and fragmented, the first and last codepoint of each UTF-8 width,
+truncated and overlong and surrogate sequences, and what happens to anything
+sent after a close.
+
+Most of it is generated from the rule rather than transcribed from the case
+list, so it covers more sequences than Autobahn publishes: section 6 alone is
+twenty nine malformed sequences in four contexts, around three hundred and
+eighty assertions, against the hundred and forty five cases the suite ships.
+Sections 12 and 13 are skipped deliberately: they are `permessage-deflate`,
+which is not implemented here, and a reserved bit is a hard error.
 
 **Autobahn itself has not been run.** It ships as a Docker image and `wstest`
 needs Python 2, so these cases are written from its specifications rather than
-driven by it. That is thirty eight of its five hundred: the rules are covered,
-but a suite catches what its author did not think to test, and this one cannot
-make that claim.
+driven by it. The rules are covered, but a suite catches what its author did
+not think to test, and this one cannot make that claim.
 
 Still to come: the `endpoint-libs` adapter.
