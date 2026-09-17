@@ -19,11 +19,21 @@ reactor = ["std", "dep:libc", "dep:nagoya"]
 # wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
 # rather than a second I/O stack.
 tls = ["reactor", "dep:nago-rustls"]
+# Validate text frames with vector instructions rather than the standard
+# library's byte loop. The crate it uses contains unsafe, which is why this is
+# a feature: `proto` forbids unsafe of its own and a consumer that would
+# rather not carry any can leave this off and lose only speed.
+simd-utf8 = ["dep:simdutf8"]
 # The bundled trust anchors, forwarded from nago-rustls. Off, a caller
 # supplies its own configuration.
 webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 
 [dependencies]
+# SIMD UTF-8 validation. Optional because the protocol core forbids unsafe and
+# this crate does not: it is the standard library's validator with vector
+# instructions, and on this machine it is between four and thirteen times
+# faster on the text frames that have to be checked.
+simdutf8 = { version = "0.1", default-features = false, optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }

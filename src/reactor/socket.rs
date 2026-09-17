@@ -174,7 +174,7 @@ impl Addr {
 #[inline]
 fn check(value: libc::c_int) -> Result<libc::c_int> {
     if value < 0 {
-        Err(Errno::last())
+        Err(crate::reactor::error::last())
     } else {
         Ok(value)
     }
@@ -292,7 +292,7 @@ impl TcpSocket {
             libc::connect(fd.raw(), core::ptr::addr_of!(storage).cast(), len)
         };
         if result < 0 {
-            let error = Errno::last();
+            let error = crate::reactor::error::last();
             // Expected: the handshake is in flight.
             if error.0 != libc::EINPROGRESS {
                 return Err(error);
@@ -375,7 +375,7 @@ impl TcpSocket {
     pub unsafe fn recv(&self, pointer: *mut u8, len: usize) -> Result<usize> {
         let read = libc::recv(self.raw(), pointer.cast(), len, 0);
         if read < 0 {
-            Err(Errno::last())
+            Err(crate::reactor::error::last())
         } else {
             Ok(read as usize)
         }
@@ -422,7 +422,7 @@ impl TcpSocket {
         // `count` entries starting at `start`, all within it.
         let sent = unsafe { libc::sendmsg(self.raw(), core::ptr::addr_of!(message), flags) };
         if sent < 0 {
-            Err(Errno::last())
+            Err(crate::reactor::error::last())
         } else {
             Ok(sent as usize)
         }

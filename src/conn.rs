@@ -44,7 +44,7 @@ use crate::proto::frame::{FrameError, Header};
 use crate::proto::message::{Assembler, Limits, Message, ProtocolError};
 use crate::proto::opcode::{CloseCode, OpCode};
 use crate::proto::{mask, message::CloseFrame};
-use crate::reactor::bytes::ByteStream;
+use crate::reactor::bytes::{ByteStream, StreamExt};
 use crate::reactor::error::Errno;
 #[cfg(test)]
 use crate::reactor::socket::Addr;
@@ -90,13 +90,6 @@ impl From<Errno> for Error {
     }
 }
 
-/// The TLS crate carries the same code in its own wrapper.
-#[cfg(feature = "tls")]
-impl From<nago_rustls::Errno> for Error {
-    fn from(value: nago_rustls::Errno) -> Self {
-        Self::Io(Errno(value.0))
-    }
-}
 
 impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -150,7 +143,7 @@ pub struct Connection<S = crate::reactor::net::TcpStream> {
     close_sent: bool,
 }
 
-impl<S: ByteStream> Connection<S> {
+impl<S: ByteStream + StreamExt> Connection<S> {
     /// Wrap an already upgraded stream.
     ///
     /// The handshake is the caller's business; by the time a `Connection`

@@ -326,7 +326,7 @@ impl core::future::Future for WriteAllVectored<'_> {
                 // A socket that accepts nothing is not going to start; the
                 // peer has gone. Reported as a broken pipe, which is what the
                 // next write would have produced anyway.
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(Errno(libc::EPIPE))),
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE)),
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -370,7 +370,7 @@ impl core::future::Future for WriteAll<'_> {
                 // A socket that accepts nothing is not going to start; the
                 // peer has gone. Reported as a broken pipe, which is what the
                 // next write would have produced anyway.
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(Errno(libc::EPIPE))),
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(crate::reactor::error::codes::BROKEN_PIPE)),
                 Poll::Ready(Ok(n)) => this.written += n,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -435,7 +435,7 @@ impl TcpListener {
                 // A connection that died between the readiness event and the
                 // accept is not this listener's problem: drop it and look for
                 // the next one rather than failing the accept loop.
-                Err(error) if error.transient_accept() => continue,
+                Err(error) if super::error::transient_accept(error) => continue,
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }

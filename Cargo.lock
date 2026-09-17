@@ -413,7 +413,7 @@ dependencies = [
 name = "nago-rustls"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "nagoya",
  "rustls",
  "rustls-pki-types",
  "webpki-roots",
@@ -429,6 +429,7 @@ dependencies = [
  "nago-rustls",
  "nagoya",
  "rcgen",
+ "simdutf8",
  "sockudo-ws",
  "tokio",
  "tokio-tungstenite",

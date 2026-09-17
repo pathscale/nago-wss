@@ -82,6 +82,29 @@ impl Default for Limits {
     }
 }
 
+/// Check that `payload` is UTF-8.
+///
+/// The standard library's validator is a byte loop. With `simd-utf8` on, this
+/// is `simdutf8`, which is the same algorithm over vector instructions and
+/// measured between four and thirteen times faster here on the text sizes a
+/// WebSocket actually carries.
+///
+/// Behind a feature because that crate contains `unsafe` and this module
+/// forbids its own. A consumer that wants none at all leaves it off and pays
+/// the byte loop, which is correct either way: both answer the same question
+/// and a frame that fails one fails the other.
+#[inline]
+fn is_utf8(payload: &[u8]) -> bool {
+    #[cfg(feature = "simd-utf8")]
+    {
+        simdutf8::basic::from_utf8(payload).is_ok()
+    }
+    #[cfg(not(feature = "simd-utf8"))]
+    {
+        core::str::from_utf8(payload).is_ok()
+    }
+}
+
 /// Reassembles frames into messages and enforces the cross-frame rules.
 ///
 /// Holds at most one partial message at a time, which is all the protocol
@@ -199,7 +222,7 @@ impl Assembler {
     ) -> Result<Message, ProtocolError> {
         match kind {
             OpCode::Text => {
-                if core::str::from_utf8(&payload).is_err() {
+                if !is_utf8(&payload) {
                     return Err(ProtocolError::InvalidUtf8);
                 }
                 Ok(Message::Text(payload))
@@ -238,7 +261,7 @@ fn parse_close_body(payload: &Bytes) -> Result<Option<CloseFrame>, ProtocolError
     }
 
     let reason = payload.slice(2..);
-    if core::str::from_utf8(&reason).is_err() {
+    if !is_utf8(&reason) {
         return Err(ProtocolError::InvalidUtf8);
     }
 

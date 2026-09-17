@@ -125,7 +125,7 @@ impl Poller {
 /// The last OS error when `value` signals failure.
 fn check(value: i32) -> Result<i32> {
     if value < 0 {
-        Err(Errno::last())
+        Err(crate::reactor::error::last())
     } else {
         Ok(value)
     }
@@ -279,7 +279,7 @@ mod sys {
                 )
             };
             if count < 0 {
-                let error = Errno::last();
+                let error = crate::reactor::error::last();
                 // A signal during the wait is not a failure: the caller's loop
                 // simply goes around again.
                 if error.interrupted() {
@@ -440,7 +440,7 @@ mod sys {
                 )
             };
             if count < 0 {
-                let error = Errno::last();
+                let error = crate::reactor::error::last();
                 if error.interrupted() {
                     return Ok(());
                 }
@@ -487,7 +487,7 @@ mod sys {
                 )
             };
             if written < 0 {
-                let error = Errno::last();
+                let error = crate::reactor::error::last();
                 // EAGAIN means the counter is saturated, which already means a
                 // wake is pending. Nothing to do.
                 if error.would_block() {
