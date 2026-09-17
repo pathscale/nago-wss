@@ -12,6 +12,20 @@
 //! [`write_tls`]: rustls::ConnectionCommon::write_tls
 //! [`process_new_packets`]: rustls::ConnectionCommon::process_new_packets
 //!
+//! # Why this is generic over the stream
+//!
+//! Nothing here is specific to a TCP socket. The loop needs somewhere to put
+//! ciphertext and somewhere to get it from, which is two methods, so that is
+//! what it asks for. [`TcpStream`](crate::reactor::net::TcpStream) satisfies
+//! it, and so would a Unix socket, an in-memory pipe for a test, or another
+//! crate's stream entirely.
+//!
+//! That keeps this module an island: it depends on rustls and on a two method
+//! trait rather than on this crate's reactor, so it could be lifted out whole
+//! if it ever earns its own crate. It has not yet: it is a few hundred lines
+//! that have only run against one reactor on one platform, and publishing it
+//! would turn that into a promise.
+//!
 //! # The shape of the loop
 //!
 //! Every operation is the same three steps in a ring: give rustls whatever the
@@ -28,15 +42,38 @@ use std::io::{Read as _, Write as _};
 use rustls::{ClientConnection, ServerConnection};
 
 use crate::reactor::error::{Errno, Result};
-use crate::reactor::net::TcpStream;
+
+/// Somewhere to read ciphertext from and write it to.
+///
+/// The whole of what the TLS loop needs from a transport. Deliberately two
+/// methods: anything larger would couple this to a particular socket, and the
+/// point is that it is not.
+#[allow(async_fn_in_trait)]
+pub trait ByteStream {
+    /// Read ciphertext into `buffer`, returning zero at end of stream.
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize>;
+
+    /// Write all of `buffer`.
+    async fn write_all(&mut self, buffer: &[u8]) -> Result<()>;
+}
+
+impl ByteStream for crate::reactor::net::TcpStream {
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        Self::read(self, buffer).await
+    }
+
+    async fn write_all(&mut self, buffer: &[u8]) -> Result<()> {
+        Self::write_all(self, buffer).await
+    }
+}
 
 /// A TLS session over a reactor socket.
 ///
 /// Either end of the connection: the difference is only which rustls type is
 /// inside, and every operation below is identical for both.
 #[derive(Debug)]
-pub struct TlsStream {
-    stream: TcpStream,
+pub struct TlsStream<S> {
+    stream: S,
     session: Session,
     /// Plaintext rustls has decrypted but the caller has not taken yet.
     incoming: Vec<u8>,
@@ -73,9 +110,9 @@ macro_rules! session {
     };
 }
 
-impl TlsStream {
-    /// Start a client session over an already connected socket.
-    pub fn client(stream: TcpStream, session: ClientConnection) -> Self {
+impl<S: ByteStream> TlsStream<S> {
+    /// Start a client session over an already connected stream.
+    pub fn client(stream: S, session: ClientConnection) -> Self {
         Self {
             stream,
             session: Session::Client(alloc::boxed::Box::new(session)),
@@ -84,8 +121,8 @@ impl TlsStream {
         }
     }
 
-    /// Start a server session over an already accepted socket.
-    pub fn server(stream: TcpStream, session: ServerConnection) -> Self {
+    /// Start a server session over an already accepted stream.
+    pub fn server(stream: S, session: ServerConnection) -> Self {
         Self {
             stream,
             session: Session::Server(alloc::boxed::Box::new(session)),
@@ -237,8 +274,8 @@ impl TlsStream {
         }
     }
 
-    /// The socket underneath, for a caller that needs its address.
-    pub fn get_ref(&self) -> &TcpStream {
+    /// The stream underneath, for a caller that needs its address.
+    pub fn get_ref(&self) -> &S {
         &self.stream
     }
 }
@@ -395,6 +432,84 @@ mod tests {
         });
 
         client.join().expect("client thread");
+    }
+
+    #[test]
+    fn the_loop_works_over_something_that_is_not_a_socket() {
+        // The point of the trait: this drives a full TLS handshake and a round
+        // trip over an in-memory pipe, with no reactor and no file descriptor
+        // anywhere. If this compiles and passes, the module is extractable.
+        use std::sync::mpsc::{Receiver, SyncSender};
+
+        struct Pipe {
+            outgoing: SyncSender<alloc::vec::Vec<u8>>,
+            incoming: Receiver<alloc::vec::Vec<u8>>,
+            pending: alloc::vec::Vec<u8>,
+        }
+
+        impl ByteStream for Pipe {
+            async fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+                while self.pending.is_empty() {
+                    match self.incoming.recv() {
+                        Ok(chunk) => self.pending = chunk,
+                        // The far end went away, which is end of stream.
+                        Err(_) => return Ok(0),
+                    }
+                }
+                let take = self.pending.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.pending[..take]);
+                self.pending.drain(..take);
+                Ok(take)
+            }
+
+            async fn write_all(&mut self, buffer: &[u8]) -> Result<()> {
+                self.outgoing
+                    .send(buffer.to_vec())
+                    .map_err(|_| Errno(libc::EPIPE))
+            }
+        }
+
+        let (server_config, client_config) = certificate();
+
+        // Two channels crossed over, so each end reads what the other wrote.
+        let (to_server, server_receives) = std::sync::mpsc::sync_channel(64);
+        let (to_client, client_receives) = std::sync::mpsc::sync_channel(64);
+
+        let server = std::thread::spawn(move || {
+            let pipe = Pipe {
+                outgoing: to_client,
+                incoming: server_receives,
+                pending: alloc::vec::Vec::new(),
+            };
+            let session = ServerConnection::new(server_config).expect("session");
+            let mut tls = TlsStream::server(pipe, session);
+            nagoya::block_on(async move {
+                tls.handshake().await.expect("handshake");
+                let mut buffer = [0u8; 5];
+                let read = tls.read(&mut buffer).await.expect("read");
+                assert_eq!(&buffer[..read], b"hello");
+                tls.write_all(b"world").await.expect("write");
+            });
+        });
+
+        let pipe = Pipe {
+            outgoing: to_server,
+            incoming: client_receives,
+            pending: alloc::vec::Vec::new(),
+        };
+        let name = ServerName::try_from("localhost").expect("name");
+        let session = ClientConnection::new(client_config, name).expect("session");
+        let mut tls = TlsStream::client(pipe, session);
+
+        nagoya::block_on(async move {
+            tls.handshake().await.expect("handshake");
+            tls.write_all(b"hello").await.expect("write");
+            let mut buffer = [0u8; 5];
+            let read = tls.read(&mut buffer).await.expect("read");
+            assert_eq!(&buffer[..read], b"world");
+        });
+
+        server.join().expect("server thread");
     }
 
     #[test]
