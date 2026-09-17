@@ -36,6 +36,11 @@ nagoya = { path = "../nagoya", optional = true }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
+# The third arm: advertises itself as an ultra low latency WebSocket for HFT,
+# and gets there with SIMD masking and a good deal of unsafe. Worth measuring
+# against precisely because it sits at the other end of that trade from this
+# crate, which forbids unsafe in the protocol core.
+sockudo-ws = "2.0.1"
 
 [[bench]]
 name = "echo"
