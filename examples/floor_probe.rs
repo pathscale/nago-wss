@@ -195,6 +195,124 @@ fn raw_libc_syscalls() -> f64 {
     elapsed.as_secs_f64() / ROUND_TRIPS as f64 * 1e6
 }
 
+/// What one mode switch costs, measured on its own.
+///
+/// If the round trip is syscall bound then the cost of a single trivial
+/// syscall, times the number of them, should account for most of it. This
+/// measures the cheapest syscall there is so that arithmetic can be checked
+/// rather than assumed.
+fn one_syscall() -> f64 {
+    const CALLS: usize = 200_000;
+    let start = Instant::now();
+    for _ in 0..CALLS {
+        // `getpid` does essentially nothing in the kernel, so what is left is
+        // the mode switch. It is not vDSO accelerated on macOS the way a clock
+        // read is, which is what makes it usable as a probe.
+        unsafe {
+            libc::getpid();
+        }
+    }
+    start.elapsed().as_secs_f64() / CALLS as f64 * 1e6
+}
+
+/// A round trip where the read half is a blocking recv on its own thread.
+///
+/// The readiness model spends a syscall discovering there is nothing to read,
+/// then another waiting, then another reading. A blocking recv is one syscall
+/// that returns when the data arrives. This is the shape a completion based
+/// interface would have, approximated with threads, and it bounds what
+/// removing the speculative calls could buy before any io_uring exists.
+fn blocking_recv_shape() -> f64 {
+    use std::io::{Read, Write};
+    let (mut client, mut server) = pair();
+
+    let echo = std::thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        for _ in 0..ROUND_TRIPS {
+            if server.read(&mut byte).expect("read") == 0 {
+                break;
+            }
+            server.write_all(&byte).expect("write");
+        }
+    });
+
+    let mut byte = [0u8; 1];
+    let start = Instant::now();
+    for _ in 0..ROUND_TRIPS {
+        client.write_all(b"x").expect("write");
+        // One syscall that parks until the byte is there: no EWOULDBLOCK
+        // probe, no separate wait call.
+        client.read_exact(&mut byte).expect("read");
+    }
+    let elapsed = start.elapsed();
+    drop(client);
+    echo.join().expect("echo");
+    elapsed.as_secs_f64() / ROUND_TRIPS as f64 * 1e6
+}
+
+/// The same ping pong over a Unix socket pair instead of loopback TCP.
+///
+/// Same syscalls, same threads, same handoff, but none of the TCP stack. What
+/// separates this from the TCP number is what loopback TCP costs: checksums,
+/// the protocol path, and the socket buffer machinery around it.
+fn unix_socket_shape() -> f64 {
+    let mut fds = [0i32; 2];
+    let result =
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    assert_eq!(result, 0, "socketpair failed");
+    let (client_fd, server_fd) = (fds[0], fds[1]);
+
+    let echo = std::thread::spawn(move || {
+        let mut byte = 0u8;
+        for _ in 0..ROUND_TRIPS {
+            let read = unsafe {
+                libc::recv(
+                    server_fd,
+                    std::ptr::addr_of_mut!(byte).cast::<libc::c_void>(),
+                    1,
+                    0,
+                )
+            };
+            if read <= 0 {
+                break;
+            }
+            unsafe {
+                libc::send(
+                    server_fd,
+                    std::ptr::addr_of!(byte).cast::<libc::c_void>(),
+                    1,
+                    0,
+                );
+            }
+        }
+        unsafe { libc::close(server_fd) };
+    });
+
+    let out = b'x';
+    let mut byte = 0u8;
+    let start = Instant::now();
+    for _ in 0..ROUND_TRIPS {
+        unsafe {
+            libc::send(
+                client_fd,
+                std::ptr::addr_of!(out).cast::<libc::c_void>(),
+                1,
+                0,
+            );
+            libc::recv(
+                client_fd,
+                std::ptr::addr_of_mut!(byte).cast::<libc::c_void>(),
+                1,
+                0,
+            );
+        }
+    }
+    let elapsed = start.elapsed();
+    unsafe { libc::close(client_fd) };
+    echo.join().expect("echo");
+    elapsed.as_secs_f64() / ROUND_TRIPS as f64 * 1e6
+}
+
 fn main() {
     // Warm every path.
     let _ = raw_libc_syscalls();
@@ -217,5 +335,32 @@ fn main() {
     println!("     readiness costs             {:>8.2}", readiness - blocking);
     println!("  3. full reactor (floor bench)  {:>8.2}  (measured separately)", 18.2);
     println!("     this crate's machinery      {:>8.2}", 18.2 - readiness);
-    println!();
+    let syscall = one_syscall();
+    let blocking_shape = (0..3)
+        .map(|_| blocking_recv_shape())
+        .fold(f64::MAX, f64::min);
+
+    println!("  one trivial syscall            {syscall:>8.4}");
+    println!(
+        "  readiness does ~4 calls/trip   {:>8.2}  of pure mode switching",
+        syscall * 4.0
+    );
+    println!("\n  completion shaped (blocking recv, no readiness probe)");
+    println!("    {blocking_shape:>8.2} us/op vs {readiness:.2} for readiness");
+    println!(
+        "    so removing the speculative calls is worth about {:.2}us here",
+        readiness - blocking_shape
+    );
+
+    let unix = (0..3).map(|_| unix_socket_shape()).fold(f64::MAX, f64::min);
+    println!("\n  same ping pong over a unix socketpair");
+    println!("    {unix:>8.2} us/op vs {raw:.2} for loopback TCP");
+    println!(
+        "    so the TCP stack itself is about {:.2}us of the {raw:.2}\n",
+        raw - unix
+    );
+    println!(
+        "  a syscall is {:.4}us, so the {raw:.2}us is not syscall count:\n           it is the kernel scheduling two threads through a socket.\n",
+        syscall
+    );
 }
