@@ -34,6 +34,58 @@ fn best(mut values: Vec<Duration>) -> Duration {
     values[0]
 }
 
+/// The same, with the reactor and the task sharing a thread.
+///
+/// This is the arrangement tokio's current-thread runtime uses, and the one
+/// the threaded reactor below pays a park and unpark per message to avoid.
+fn nago_local_floor() -> Duration {
+    use nago_wss::reactor::block_on_with;
+    use nago_wss::reactor::Reactor;
+
+    let reactor = Reactor::local().expect("reactor");
+    let handle = reactor.handle();
+    let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    // The echo half is a plain blocking socket on its own thread. What is
+    // being measured is this side's path; giving the peer its own reactor
+    // would measure two of them and hide which one cost what.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let reactor = Reactor::local().expect("reactor");
+        block_on_with(&reactor, async move {
+            // Tell the client the accept is armed before it connects, so the
+            // two do not race.
+            ready_tx.send(()).expect("signal");
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut byte = [0u8; 1];
+            for _ in 0..ROUND_TRIPS {
+                let read = stream.read(&mut byte).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                stream.write_all(&byte).await.expect("write");
+            }
+        });
+    });
+
+    ready_rx.recv().expect("server ready");
+    let elapsed = block_on_with(&reactor, async {
+        let mut stream = TcpStream::connect(addr, &handle).await.expect("connect");
+        let mut byte = [0u8; 1];
+        let start = Instant::now();
+        for _ in 0..ROUND_TRIPS {
+            stream.write_all(b"x").await.expect("write");
+            let read = stream.read(&mut byte).await.expect("read");
+            assert_eq!(read, 1, "peer closed mid benchmark");
+        }
+        start.elapsed()
+    });
+
+    server.join().expect("server");
+    elapsed
+}
+
 /// One byte there, one byte back, on this crate's reactor.
 fn nago_floor() -> Duration {
     let reactor = Reactor::start().expect("reactor");
@@ -116,14 +168,17 @@ fn tokio_floor() -> Duration {
 fn main() {
     // Warm both arms; the first connection pays for lazily initialised state.
     let _ = nago_floor();
+    let _ = nago_local_floor();
     let _ = tokio_floor();
 
     let nago = best((0..SAMPLES).map(|_| nago_floor()).collect());
+    let nago_local = best((0..SAMPLES).map(|_| nago_local_floor()).collect());
     let tokio = best((0..SAMPLES).map(|_| tokio_floor()).collect());
 
     let each = |d: Duration| d.as_secs_f64() / ROUND_TRIPS as f64 * 1e6;
     println!("\ntransport floor, 1 byte round trip (best of {SAMPLES})\n");
-    println!("  nago-wss reactor   {:>8.2} us/op", each(nago));
+    println!("  nago-wss threaded  {:>8.2} us/op", each(nago));
+    println!("  nago-wss local     {:>8.2} us/op", each(nago_local));
     println!("  tokio              {:>8.2} us/op", each(tokio));
     // The echo benchmark's round trip numbers, for subtraction. Hardcoded
     // rather than measured here because running the WebSocket arms again just

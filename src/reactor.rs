@@ -6,6 +6,7 @@
 
 pub mod driver;
 pub mod error;
+pub mod local;
 pub mod net;
 pub mod socket;
 #[cfg(test)]
@@ -14,6 +15,7 @@ pub mod poller;
 
 pub use driver::{Handle, Reactor, Registration};
 pub use error::{Errno, Result};
+pub use local::{block_on, block_on_with};
 pub use net::{TcpListener, TcpStream};
 pub use socket::Addr;
 pub use poller::{Event, Interest, Poller};

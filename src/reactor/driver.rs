@@ -260,7 +260,39 @@ pub struct Reactor {
 }
 
 impl Reactor {
-    /// Start the reactor.
+    /// Create a reactor with no thread of its own.
+    ///
+    /// Nothing runs until someone calls [`Self::poll_once`], which is what
+    /// [`block_on`](super::local::block_on) does on the thread that also polls
+    /// the future. That arrangement saves a park and an unpark per message
+    /// against the threaded reactor; see that module for when each fits.
+    pub fn local() -> Result<Self> {
+        Ok(Self {
+            shared: Arc::new(Shared {
+                poller: Poller::new()?,
+                slots: Mutex::new(HashMap::new()),
+                next_index: AtomicU64::new(0),
+                running: AtomicBool::new(true),
+                next_deadline: AtomicU64::new(NO_DEADLINE),
+            }),
+            thread: None,
+        })
+    }
+
+    /// Wait for readiness once and wake whatever it belongs to.
+    ///
+    /// For a reactor from [`Self::local`]. Returns after one wait, having
+    /// woken any task whose descriptor became ready, so the caller can poll.
+    pub fn poll_once(&self) -> Result<()> {
+        let timeout = service_timers(&self.shared);
+        let mut events = Vec::new();
+        self.shared.poller.wait(&mut events, timeout)?;
+        let mut pending = Vec::new();
+        dispatch(&self.shared, &events, &mut pending);
+        Ok(())
+    }
+
+    /// Start the reactor on its own thread.
     pub fn start() -> Result<Self> {
         let shared = Arc::new(Shared {
             poller: Poller::new()?,

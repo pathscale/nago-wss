@@ -343,8 +343,6 @@ fn wake_latency() -> f64 {
     use core::future::Future;
     use core::pin::Pin;
     use core::task::{Context, Poll};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     const HOPS: usize = 20_000;
 
@@ -362,9 +360,6 @@ fn wake_latency() -> f64 {
             Poll::Pending
         }
     }
-
-    let counter = Arc::new(AtomicUsize::new(0));
-    let _ = counter;
 
     let start = Instant::now();
     nagoya::block_on(Yielder(HOPS));
