@@ -439,9 +439,9 @@ dependencies = [
 
 [[package]]
 name = "nagoya"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51e5c447ac5f01b67e5772708e9603f176df44c614dac18e6f9d6c69b165e00a"
+checksum = "3e452e5a85bf0d60565864a78f270668b98213b21e37369ab77838a1605f9c7f"
 dependencies = [
  "async-task",
  "bytes",

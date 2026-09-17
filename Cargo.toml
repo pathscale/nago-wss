@@ -55,7 +55,7 @@ nago-rustls = { version = "0.1.1", optional = true }
 # there, because generational tokens and edge triggered registration are the
 # same problem for anything that wants a socket, and none of it was about
 # WebSockets.
-nagoya = { version = "0.1.5", features = ["reactor"], optional = true }
+nagoya = { version = "0.1.6", features = ["reactor"], optional = true }
 # Name resolution only. `getaddrinfo` is the one syscall this crate still binds
 # itself, because nagoya has no resolver to take it. Everything else that
 # called the kernel left with the reactor.
@@ -66,7 +66,7 @@ libc = { version = "^0.2.189", default-features = false, optional = true }
 # rather than a plain one because this crate is generic over its transport: a
 # consumer supplies the socket, so only the things here that need a running
 # one name it.
-nagoya = { version = "0.1.5", features = ["reactor"] }
+nagoya = { version = "0.1.6", features = ["reactor"] }
 # Test certificates, generated in process. Same version endpoint-libs uses.
 rcgen = "0.14"
 # The comparison arm, and the only reason these are here. Same version
@@ -80,21 +80,29 @@ futures-util = "0.3"
 # crate, which forbids unsafe in the protocol core.
 sockudo-ws = "2.0.1"
 
+# Every one of these drives a real socket, so they need the reactor and say
+# so. It is a default feature, so they build without the line; the line is
+# what keeps `--no-default-features` from trying to build them and failing on
+# an import instead of skipping them.
 [[bench]]
 name = "echo"
 harness = false
+required-features = ["reactor"]
 
 [[bench]]
 name = "floor"
 harness = false
+required-features = ["reactor"]
 
 [[bench]]
 name = "concurrent"
 harness = false
+required-features = ["reactor"]
 
 [[bench]]
 name = "scale"
 harness = false
+required-features = ["reactor"]
 
 # Requires the feature rather than tolerating its absence. Without it the
 # UTF-8 columns silently measure `core::str::from_utf8`, which is the same
