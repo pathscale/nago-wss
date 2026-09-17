@@ -141,7 +141,7 @@ pub struct ClientOptions<'a> {
     ///
     /// `None` uses the webpki roots.
     #[cfg(feature = "tls")]
-    pub tls: Option<alloc::sync::Arc<rustls::ClientConfig>>,
+    pub tls: Option<alloc::sync::Arc<crate::tls::rustls::ClientConfig>>,
 }
 
 impl Default for ClientOptions<'_> {
@@ -283,7 +283,9 @@ pub async fn connect_secure(
     handle: &Handle,
     options: ClientOptions<'_>,
 ) -> Result<Connected<crate::tls::TlsStream<TcpStream>>, Error> {
-    use rustls_pki_types::ServerName;
+    // Through the re-export, so this crate never names a rustls version of
+    // its own and cannot drift from the one nago-rustls links.
+    use crate::tls::rustls_pki_types::ServerName;
 
     let addrs = resolve(&url.host, url.port)?;
     let stream = connect_any(&addrs, handle).await?;
@@ -296,7 +298,7 @@ pub async fn connect_secure(
     // host from the URL rather than the address that was connected to.
     let name = ServerName::try_from(url.host.clone())
         .map_err(|_| Error::Url("host is not a valid server name"))?;
-    let session = rustls::ClientConnection::new(config, name)
+    let session = crate::tls::rustls::ClientConnection::new(config, name)
         .map_err(|_| Error::Io(Errno(libc::EPROTO)))?;
 
     let mut tls = crate::tls::TlsStream::client(stream, session);
@@ -409,7 +411,8 @@ mod tests {
         use crate::reactor::{Reactor, TcpListener};
         use alloc::sync::Arc;
         use bytes::Bytes;
-        use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        use crate::tls::rustls;
+        use crate::tls::rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
         let issued = rcgen::generate_simple_self_signed(["localhost".to_string()])
             .expect("certificate");

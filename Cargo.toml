@@ -11,7 +11,7 @@ categories = ["network-programming", "web-programming::websocket", "no-std"]
 
 [features]
 # The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
-default = ["std", "reactor", "tls"]
+default = ["std", "reactor", "tls", "webpki-roots"]
 std = []
 # The readiness reactor: kqueue/epoll, sockets, and the futures over them.
 # Needs `std` for `io::Error` and owned descriptors.
@@ -19,6 +19,9 @@ reactor = ["std", "dep:libc", "dep:nagoya"]
 # wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
 # rather than a second I/O stack.
 tls = ["reactor", "dep:nago-rustls"]
+# The bundled trust anchors, forwarded from nago-rustls. Off, a caller
+# supplies its own configuration.
+webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 
 [dependencies]
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,

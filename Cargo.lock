@@ -410,20 +410,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nago-rustls"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustls",
+ "rustls-pki-types",
+ "webpki-roots",
+]
+
+[[package]]
 name = "nago-wss"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
  "libc",
+ "nago-rustls",
  "nagoya",
  "rcgen",
- "rustls",
- "rustls-pki-types",
  "sockudo-ws",
  "tokio",
  "tokio-tungstenite",
- "webpki-roots",
 ]
 
 [[package]]

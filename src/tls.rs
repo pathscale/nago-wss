@@ -15,6 +15,42 @@
 
 pub use nago_rustls::{Errno as TlsErrno, TlsSession};
 
+// Two crates each define what a byte stream is, and they have to agree. The
+// traits are the same two methods, so the bridge is mechanical, but it has to
+// be written here: neither crate can implement the other's trait for the
+// other's type.
+impl nago_rustls::ByteStream for crate::reactor::net::TcpStream {
+    async fn read(&mut self, buffer: &mut [u8]) -> nago_rustls::Result<usize> {
+        crate::reactor::bytes::ByteStream::read(self, buffer)
+            .await
+            .map_err(|error| nago_rustls::Errno(error.0))
+    }
+
+    async fn write_all(&mut self, buffer: &[u8]) -> nago_rustls::Result<()> {
+        crate::reactor::bytes::ByteStream::write_all(self, buffer)
+            .await
+            .map_err(|error| nago_rustls::Errno(error.0))
+    }
+}
+
+/// A TLS session carries WebSocket frames, which is the point of the feature.
+impl<S> crate::reactor::bytes::ByteStream for TlsSession<S>
+where
+    S: nago_rustls::ByteStream,
+{
+    async fn read(&mut self, buffer: &mut [u8]) -> crate::reactor::error::Result<usize> {
+        TlsSession::read(self, buffer)
+            .await
+            .map_err(|error| crate::reactor::error::Errno(error.0))
+    }
+
+    async fn write_all(&mut self, buffer: &[u8]) -> crate::reactor::error::Result<()> {
+        TlsSession::write_all(self, buffer)
+            .await
+            .map_err(|error| crate::reactor::error::Errno(error.0))
+    }
+}
+
 /// The previous name for [`TlsSession`], kept so existing callers compile.
 pub type TlsStream<S> = TlsSession<S>;
 

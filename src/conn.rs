@@ -90,6 +90,14 @@ impl From<Errno> for Error {
     }
 }
 
+/// The TLS crate carries the same code in its own wrapper.
+#[cfg(feature = "tls")]
+impl From<nago_rustls::Errno> for Error {
+    fn from(value: nago_rustls::Errno) -> Self {
+        Self::Io(Errno(value.0))
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
