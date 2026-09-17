@@ -9,6 +9,13 @@
 //! If the two floors match the two WebSocket numbers, the framing is not what
 //! is being measured and optimising it is wasted effort.
 //!
+//! # Why there is no sockudo-ws arm here
+//!
+//! It runs on tokio, so its transport floor is the tokio arm. A third column
+//! would measure the same reactor twice and imply a difference that does not
+//! exist. Where sockudo-ws differs is above this line, in framing and in how
+//! it drives many connections, which is what `micro` and `scale` measure.
+//!
 //! # What the remaining gap is not
 //!
 //! This crate sits about 3us behind tokio on a single connection doing one

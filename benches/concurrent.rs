@@ -34,13 +34,13 @@ use nago_wss::reactor::socket::Addr;
 use nago_wss::reactor::{Reactor, TcpListener, TcpStream};
 
 /// How many connections to run at once, in successive rounds.
-const COUNTS: [usize; 5] = [1, 8, 16, 32, 64];
+const COUNTS: [usize; 3] = [1, 8, 32];
 /// Messages each connection sends.
-const PER_CONNECTION: usize = 30;
+const PER_CONNECTION: usize = 20;
 /// Payload size, in the range the fleet's RPC traffic actually uses.
 const PAYLOAD: usize = 256;
 /// Samples per count; the best is reported.
-const SAMPLES: usize = 2;
+const SAMPLES: usize = 1;
 
 fn best(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();
@@ -216,17 +216,150 @@ mod tokio_arm {
     }
 }
 
+// --- sockudo-ws -----------------------------------------------------------
+
+mod sockudo_arm {
+    use super::{PAYLOAD, PER_CONNECTION};
+    use bytes::BytesMut;
+    use futures_util::{SinkExt, StreamExt};
+    use sockudo_ws::handshake::{build_response, generate_accept_key, parse_request};
+    use sockudo_ws::protocol::Message as SMessage;
+    use sockudo_ws::{Config, WebSocketStream};
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// This crate leaves the handshake to its caller, in both directions.
+    async fn server_handshake(stream: &mut TcpStream) -> bool {
+        let mut buffer = BytesMut::with_capacity(1024);
+        loop {
+            let Ok(read) = stream.read_buf(&mut buffer).await else {
+                return false;
+            };
+            if read == 0 {
+                return false;
+            }
+            match parse_request(&buffer) {
+                Ok(Some((request, _))) => {
+                    let accept = generate_accept_key(request.key);
+                    let response = build_response(&accept, None, None);
+                    if stream.write_all(&response).await.is_err() {
+                        return false;
+                    }
+                    return stream.flush().await.is_ok();
+                }
+                Ok(None) => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    async fn client_handshake(stream: &mut TcpStream, addr: SocketAddr) -> bool {
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        if stream.write_all(request.as_bytes()).await.is_err() {
+            return false;
+        }
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte).await {
+                Ok(0) | Err(_) => return false,
+                Ok(_) => seen.push(byte[0]),
+            }
+        }
+        true
+    }
+
+    /// The same round, on sockudo-ws.
+    pub fn round(count: usize) -> Duration {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async move {
+            let listener =
+                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+
+            let server = tokio::spawn(async move {
+                let mut tasks = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    stream.set_nodelay(true).ok();
+                    tasks.push(tokio::spawn(async move {
+                        if !server_handshake(&mut stream).await {
+                            return;
+                        }
+                        let mut ws = WebSocketStream::server(stream, Config::default());
+                        for _ in 0..PER_CONNECTION {
+                            let Some(Ok(message)) = ws.next().await else {
+                                break;
+                            };
+                            if ws.send(message).await.is_err() {
+                                break;
+                            }
+                        }
+                    }));
+                }
+                for task in tasks {
+                    let _ = task.await;
+                }
+            });
+
+            let payload = bytes::Bytes::from(vec![0x5Au8; PAYLOAD]);
+            let start = Instant::now();
+
+            let mut clients = Vec::with_capacity(count);
+            for _ in 0..count {
+                let payload = payload.clone();
+                clients.push(tokio::spawn(async move {
+                    let mut stream = TcpStream::connect(addr).await.expect("connect");
+                    stream.set_nodelay(true).ok();
+                    client_handshake(&mut stream, addr).await;
+                    let mut ws = WebSocketStream::client(stream, Config::default());
+                    for _ in 0..PER_CONNECTION {
+                        if ws.send(SMessage::Binary(payload.clone())).await.is_err() {
+                            break;
+                        }
+                        if ws.next().await.is_none() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            for client in clients {
+                let _ = client.await;
+            }
+            let elapsed = start.elapsed();
+
+            let _ = server.await;
+            elapsed
+        })
+    }
+}
+
 // --- reporting ------------------------------------------------------------
 
 fn main() {
     // Warm both arms on the smallest count.
     let _ = nago_round(1);
     let _ = tokio_arm::round(1);
+    let _ = sockudo_arm::round(1);
 
     println!("\naggregate throughput, {PAYLOAD} byte echo, best of {SAMPLES}\n");
     println!(
         "  {:>6}  {:>14}  {:>14}  {:>8}",
-        "conns", "nago-wss", "tokio-tung", "ratio"
+        "conns", "nago-wss", "tokio-tung", "sockudo-ws"
     );
 
     for count in COUNTS {
@@ -236,14 +369,13 @@ fn main() {
         let nago = best((0..SAMPLES).map(|_| nago_round(count)).collect());
         let tokio = best((0..SAMPLES).map(|_| tokio_arm::round(count)).collect());
 
-        let nago_rate = rate(nago);
-        let tokio_rate = rate(tokio);
+        let sockudo = best((0..SAMPLES).map(|_| sockudo_arm::round(count)).collect());
         println!(
-            "  {count:>6}  {:>10.0} m/s  {:>10.0} m/s  {:>7.2}x",
-            nago_rate,
-            tokio_rate,
-            nago_rate / tokio_rate
+            "  {count:>6}  {:>11.0} m/s  {:>11.0} m/s  {:>11.0} m/s",
+            rate(nago),
+            rate(tokio),
+            rate(sockudo),
         );
     }
-    println!("\n  ratio above 1 means nago-wss moved more messages per second.\n");
+    println!("\n  messages per second through the process, higher is better.\n");
 }
