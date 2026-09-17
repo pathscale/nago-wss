@@ -66,22 +66,15 @@ than hidden behind a single figure.
 
 ### Reproducing
 
-Do not use `cargo bench`: it rebuilds and has hung here. Build once, then run
-each binary directly.
-
 ```sh
-cargo build --release --benches --features simd-utf8
-
-B=$(ls -t target/release/deps/micro-*      | grep -v '\.d$' | head -1); "$B" --bench
-B=$(ls -t target/release/deps/echo-*       | grep -v '\.d$' | head -1); "$B" --bench
-B=$(ls -t target/release/deps/concurrent-* | grep -v '\.d$' | head -1); "$B" --bench
-B=$(ls -t target/release/deps/scale-*      | grep -v '\.d$' | head -1); "$B" --bench
-B=$(ls -t target/release/deps/floor-*      | grep -v '\.d$' | head -1); "$B" --bench
+cargo bench --features simd-utf8
 ```
 
-`micro` requires `--features simd-utf8` and refuses to run without it, so it
-cannot silently measure the scalar fallback. `echo` hangs intermittently for
-reasons not yet understood; re-run it if it does not finish.
+Or one at a time, with `--bench micro`, `--bench echo`, `--bench concurrent`,
+`--bench scale`, `--bench floor`.
+
+`micro` requires `--features simd-utf8` and refuses to build without it, so it
+cannot silently measure the scalar fallback instead of the vector path.
 
 Every arm connects to a `SocketAddr` directly. The tokio arms used to connect
 by URL, which put the system resolver in front of the socket: with a VPN
@@ -166,14 +159,13 @@ be dishonest.
 
 ### What is unstable, and by how much
 
-Three of these benchmarks do not repeat well, and a single reading from any of
-them should not be quoted:
+Two of these benchmarks do not repeat well, and a single reading from either
+should not be quoted:
 
 - `concurrent` at 8 connections has been observed between 90k and 182k msg/s
   on identical code. The two runs above are 133k and 143k.
 - `floor`'s threaded arm swings between 17.77 and 24.66 us on unchanged code,
   and has beaten the local arm in one run of three.
-- `echo` hangs intermittently, cause unknown.
 
 `scale` and `micro` repeat reliably.
 

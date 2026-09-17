@@ -2,10 +2,11 @@
 //!
 //! # What joins here
 //!
-//! [`proto`](crate::proto) knows the protocol and no I/O. [`reactor`](crate::reactor)
+//! [`proto`](crate::proto) knows the protocol and no I/O. `nagoya::reactor`
 //! knows I/O and no protocol. This is the only place the two meet, which is why
-//! the seam stayed cheap: everything above deals in [`Message`], everything
-//! below in bytes, and neither has to know about the other.
+//! the seam stayed cheap: everything above deals in
+//! [`Message`](crate::proto::message::Message), everything below in bytes, and
+//! neither has to know about the other.
 //!
 //! # Buffering
 //!

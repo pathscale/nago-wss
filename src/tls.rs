@@ -10,7 +10,7 @@
 //!
 //! It lives in [`nago_rustls`] now, and both crates take the byte stream
 //! trait from nagoya, which sits below either of them. So there is nothing to
-//! bridge: a [`TlsSession`] already implements the trait this crate's
+//! bridge: a [`TlsSession`](nago_rustls::TlsSession) already implements the trait this crate's
 //! [`Connection`](crate::conn::Connection) consumes, which is what lets a
 //! WebSocket run over TLS without knowing it has.
 //!
