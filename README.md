@@ -226,10 +226,10 @@ The connection, over whatever `nagoya::reactor` or a TLS session provides:
   reading into a `BytesMut`'s uninitialised tail, and writing a frame header and
   its payload without joining them
 
-Conformance: **the Autobahn suite passes, 301 of 301 cases.** It runs in CI on
-every push, against the echo server in `examples/autobahn_server.rs`, and the
-report is kept as a build artifact. `autobahn/README.md` has the command to run
-it yourself.
+Conformance: **the Autobahn suite passes, 301 of 301 cases**, against the echo
+server in `examples/autobahn_server.rs`. It is run locally rather than in CI,
+because it wants a container and a wire protocol test harness has no business
+holding a build runner. `autobahn/README.md` has the command.
 
 Sections 12 and 13 are excluded and nothing else is. They are
 `permessage-deflate`, which this crate does not implement: no extension is

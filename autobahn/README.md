@@ -22,7 +22,9 @@ Everything else runs, including the 9.x throughput cases.
 ## Passing
 
 A case passes with `OK`, or with `NON-STRICT` where the RFC allows more than one
-answer. Anything else fails the job. `autobahn/check.py` is what decides.
+answer. Anything else is a failure. The suite writes its verdict per case into
+`reports/servers/index.json`; read that, and treat any behavior that is not one
+of those two as a failure.
 
 ## Running it yourself
 
