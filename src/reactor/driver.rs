@@ -24,6 +24,15 @@
 //! Socket traffic and timer work are then independent: neither makes the other
 //! do anything.
 //!
+//! # Why a slot is not behind the map's lock
+//!
+//! Parking a waker and waking one both happen on every message, so anything
+//! shared between connections on that path is contention that scales with the
+//! connection count rather than with the work. The slot map's lock is taken
+//! only to find or create a slot, which happens once per registration; the
+//! waker itself lives in a per-slot lock reached through an `Arc`, so two
+//! connections parking at the same time never touch the same lock at all.
+//!
 //! # Registration lifetime
 //!
 //! A [`Registration`] owns its slot: dropping it removes the descriptor from
@@ -42,11 +51,20 @@ use super::poller::{Event, Interest, Poller};
 
 /// The wakers waiting on one descriptor.
 #[derive(Debug, Default)]
+struct Wakers {
+    reader: Option<Waker>,
+    writer: Option<Waker>,
+}
+
+/// One descriptor's registration state.
+///
+/// Held by `Arc` so a [`Registration`] can park a waker without going through
+/// the map, which is what keeps per-message work off the shared lock.
+#[derive(Debug)]
 struct Slot {
     /// Bumped on every reuse of this index, so a stale event can be spotted.
     generation: u64,
-    reader: Option<Waker>,
-    writer: Option<Waker>,
+    wakers: Mutex<Wakers>,
 }
 
 /// Shared reactor state. The thread and every handle hold one of these.
@@ -54,7 +72,10 @@ struct Slot {
 struct Shared {
     poller: Poller,
     /// Indexed by slot index, not by token: the token carries the generation.
-    slots: Mutex<HashMap<u64, Slot>>,
+    ///
+    /// Taken on registration and deregistration only. The per-message path
+    /// goes through the `Arc<Slot>` a `Registration` already holds.
+    slots: Mutex<HashMap<u64, Arc<Slot>>>,
     next_index: AtomicU64,
     running: AtomicBool,
     /// When the earliest known timer is due, in nagoya's clock, or
@@ -101,12 +122,17 @@ impl Handle {
     pub fn register(&self, fd: i32, interest: Interest) -> io::Result<Registration> {
         let index = self.shared.next_index.fetch_add(1, Ordering::Relaxed);
 
-        let generation = {
+        // A fresh index is never already present, so the generation starts at
+        // one rather than being read back out of an existing slot.
+        let generation = 1u64;
+        let slot = Arc::new(Slot {
+            generation,
+            wakers: Mutex::new(Wakers::default()),
+        });
+        {
             let mut slots = self.shared.slots.lock().expect("reactor slots poisoned");
-            let slot = slots.entry(index).or_default();
-            slot.generation = slot.generation.wrapping_add(1);
-            slot.generation
-        };
+            slots.insert(index, Arc::clone(&slot));
+        }
 
         let token = make_token(index, generation);
         if let Err(error) = self.shared.poller.add(fd, token, interest) {
@@ -120,6 +146,7 @@ impl Handle {
 
         Ok(Registration {
             shared: Arc::clone(&self.shared),
+            slot,
             fd,
             index,
             token,
@@ -170,6 +197,9 @@ impl Handle {
 #[derive(Debug)]
 pub struct Registration {
     shared: Arc<Shared>,
+    /// This descriptor's slot, held directly so parking a waker does not go
+    /// through the shared map.
+    slot: Arc<Slot>,
     fd: i32,
     index: u64,
     token: u64,
@@ -182,17 +212,21 @@ impl Registration {
     /// poller is edge triggered, so registering interest without first draining
     /// means waiting for an edge that has already passed.
     pub fn poll_readable(&self, waker: &Waker) {
-        let mut slots = self.shared.slots.lock().expect("reactor slots poisoned");
-        if let Some(slot) = slots.get_mut(&self.index) {
-            slot.reader = Some(waker.clone());
+        let mut wakers = self.slot.wakers.lock().expect("reactor slot poisoned");
+        // `will_wake` avoids the atomic refcount bump when the same task parks
+        // again, which on a busy connection is every single read.
+        match &wakers.reader {
+            Some(existing) if existing.will_wake(waker) => {}
+            _ => wakers.reader = Some(waker.clone()),
         }
     }
 
     /// Park `waker` until the descriptor is writable. See [`Self::poll_readable`].
     pub fn poll_writable(&self, waker: &Waker) {
-        let mut slots = self.shared.slots.lock().expect("reactor slots poisoned");
-        if let Some(slot) = slots.get_mut(&self.index) {
-            slot.writer = Some(waker.clone());
+        let mut wakers = self.slot.wakers.lock().expect("reactor slot poisoned");
+        match &wakers.writer {
+            Some(existing) if existing.will_wake(waker) => {}
+            _ => wakers.writer = Some(waker.clone()),
         }
     }
 
@@ -281,6 +315,10 @@ impl Drop for Reactor {
 /// wake. Nothing polls and nothing spins.
 fn run(shared: &Arc<Shared>) {
     let mut events: Vec<Event> = Vec::with_capacity(64);
+    // Reused across wakeups rather than allocated per dispatch: this runs on
+    // every readiness event, so an allocation here is an allocation per
+    // message on a busy connection.
+    let mut pending: Vec<Waker> = Vec::with_capacity(64);
 
     while shared.running.load(Ordering::Acquire) {
         let timeout = service_timers(shared);
@@ -292,7 +330,7 @@ fn run(shared: &Arc<Shared>) {
             break;
         }
 
-        dispatch(shared, &events);
+        dispatch(shared, &events, &mut pending);
     }
 }
 
@@ -321,33 +359,35 @@ fn service_timers(shared: &Arc<Shared>) -> Option<u64> {
 }
 
 /// Wake the tasks named by `events`.
-fn dispatch(shared: &Arc<Shared>, events: &[Event]) {
+///
+/// `pending` is scratch owned by the caller so that the common case allocates
+/// nothing; it is left empty on return.
+fn dispatch(shared: &Arc<Shared>, events: &[Event], pending: &mut Vec<Waker>) {
     // Wakers are collected under the lock and invoked after it is released: a
     // waker may run arbitrary code, including code that registers another
     // descriptor, and this lock is not reentrant.
-    let mut pending: Vec<Waker> = Vec::new();
-
     {
-        let mut slots = shared.slots.lock().expect("reactor slots poisoned");
+        let slots = shared.slots.lock().expect("reactor slots poisoned");
         for event in events {
             let (index, generation) = split_token(event.token);
-            let Some(slot) = slots.get_mut(&index) else {
+            let Some(slot) = slots.get(&index) else {
                 continue;
             };
             // A stale event: the slot was reused after this event was queued.
             if slot.generation != generation {
                 continue;
             }
+            let mut wakers = slot.wakers.lock().expect("reactor slot poisoned");
             if event.readable {
-                pending.extend(slot.reader.take());
+                pending.extend(wakers.reader.take());
             }
             if event.writable {
-                pending.extend(slot.writer.take());
+                pending.extend(wakers.writer.take());
             }
         }
     }
 
-    for waker in pending {
+    for waker in pending.drain(..) {
         waker.wake();
     }
 }
@@ -430,14 +470,13 @@ mod tests {
         let (index, generation) = split_token(make_token(5, 3));
         assert_eq!((index, generation), (5, 3));
 
-        let mut slots: HashMap<u64, Slot> = HashMap::new();
+        let mut slots: HashMap<u64, Arc<Slot>> = HashMap::new();
         slots.insert(
             5,
-            Slot {
+            Arc::new(Slot {
                 generation: 4,
-                reader: None,
-                writer: None,
-            },
+                wakers: Mutex::new(Wakers::default()),
+            }),
         );
 
         let slot = slots.get(&5).expect("slot");

@@ -107,6 +107,11 @@ impl std::error::Error for Error {
 }
 
 /// How much spare capacity to keep available for each read.
+///
+/// The buffer is allocated at this size once, rather than starting smaller and
+/// growing: a connection that started at 8 KiB and then reserved 16 KiB on its
+/// first read paid an allocation and a copy on the first message of every
+/// connection, which is exactly the message a latency measurement sees.
 const READ_CHUNK: usize = 16 * 1024;
 
 /// A live WebSocket connection.
@@ -139,8 +144,11 @@ impl Connection {
             stream,
             role,
             assembler: Assembler::new(limits),
-            read_buffer: BytesMut::with_capacity(8 * 1024),
-            scratch: Vec::with_capacity(8 * 1024),
+            read_buffer: BytesMut::with_capacity(READ_CHUNK),
+            // Sized for a typical RPC payload. A larger message grows this
+            // once and then keeps it, and only a client ever uses it at all,
+            // since a server writes its payload without copying.
+            scratch: Vec::with_capacity(4 * 1024),
             mask_state: seed_from(&stream_seed()),
             close_sent: false,
         }
