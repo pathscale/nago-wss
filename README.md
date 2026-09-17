@@ -71,14 +71,17 @@ Every byte a client sends and every byte a server receives.
 
 | payload | nago-wss | tungstenite | sockudo-ws |
 |---|---|---|---|
-| 64 B | 18.69 GB/s | 19.41 | **23.09** |
-| 1 KB | **86.14** | 72.23 | 54.35 |
-| 16 KB | **120.43** | 119.85 | 60.48 |
-| 256 KB | **69.75** | 68.98 | 62.91 |
+| 64 B | 18.46 GB/s | 18.96 | **22.59** |
+| 1 KB | **85.52** | 70.33 | 53.99 |
+| 16 KB | 118.36 | 118.42 | 58.89 |
+| 256 KB | 68.10 | **68.56** | 62.82 |
 
-A 64-bit word loop, which beats tungstenite's 32-bit one at every size and
-beats sockudo-ws's SIMD everywhere but 64 bytes, where per-call overhead is
-most of the measurement. No unsafe.
+A 64-bit word loop. It beats sockudo-ws's hand written NEON at 1 KB and above,
+by a wide margin, and loses to it at 64 bytes where there are too few
+iterations to amortise the call. Against tungstenite's 32-bit loop it wins at
+1 KB and ties within a percent everywhere else, which is inside this
+benchmark's run to run spread: do not read those rows as a win in either
+direction. No unsafe.
 
 ### UTF-8 validation
 
@@ -118,11 +121,14 @@ Both ends in one process, so every arm is handicapped the same way.
 
 | | establish | broadcast | memory |
 |---|---|---|---|
-| nago-wss | **0.41 s** | **97.6 ms** | 42.6 KB/conn |
-| tokio-tungstenite | 0.74 s | 316.3 ms | 151.5 KB/conn |
-| sockudo-ws | 1.09 s | 280.2 ms | **35.4 KB/conn** |
+| nago-wss | **0.44 s** | **88.2 ms** | 43.6 KB/conn |
+| tokio-tungstenite | 0.78 s | 324.8 ms | 151.5 KB/conn |
+| sockudo-ws | 1.18 s | 296.4 ms | **35.4 KB/conn** |
 
-Broadcast is 3.2x tokio-tungstenite's and establish 1.8x, on 3.6x less memory.
+Broadcast is 3.7x tokio-tungstenite's and establish 1.8x, on 3.5x less memory.
+This is the most repeatable result here: broadcast has measured between 85 and
+89ms across every run since reactor wakes were routed to the worker holding
+each descriptor, against 95 to 99ms before it.
 
 ### Concurrency
 
@@ -130,9 +136,19 @@ Aggregate throughput, 256 byte echo, messages per second.
 
 | connections | nago-wss | tokio-tungstenite | sockudo-ws |
 |---|---|---|---|
-| 1 | **18,749** | 16,589 | 16,195 |
-| 8 | **54,629** | 51,961 | 50,316 |
-| 32 | 76,508 | 75,126 | **89,325** |
+| 1 | 12,685 | 14,401 | **15,237** |
+| 8 | 125,049 | **169,566** | 154,974 |
+| 32 | 174,436 | **175,511** | 139,126 |
+
+**Read this table with suspicion.** The same binary on an idle machine has
+produced 90k and 182k at eight connections on consecutive runs, so a single
+reading of any row is worth little and the earlier numbers here, which showed
+this crate winning at one and eight connections, were that noise rather than a
+result. What repeats is the shape: tokio-tungstenite leads in the middle, and
+the three converge by thirty two.
+
+Ten thousand connections, below, is the count that does repeat, and it is also
+the one a fleet actually runs.
 
 ### Where this loses
 
