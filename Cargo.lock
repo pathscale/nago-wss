@@ -131,6 +131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crossbeam-queue"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +254,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "zlib-rs",
+]
+
+[[package]]
+name = "flexpect"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91463e4ffff882636c3bf769011bd013857c57c9485cd0e8f3be0cace23ef7db"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -430,8 +448,8 @@ dependencies = [
  "libc",
  "nago-rustls",
  "nagoya",
+ "ps-simdutf8",
  "rcgen",
- "simdutf8",
  "sockudo-ws",
  "tokio",
  "tokio-tungstenite",
@@ -575,6 +593,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps-simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dfd10dfabfa6220508b049c8e57b47d21e1a085ba42b764786262551bfd8652"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "flexpect",
+ "rustversion",
+]
+
+[[package]]
 name = "ps-st3"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,6 +741,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -754,7 +789,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 

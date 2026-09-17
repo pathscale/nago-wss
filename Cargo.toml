@@ -48,12 +48,17 @@ webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 # have the vector paths. Taking the defaults would hand that consumer `std`
 # through the back door and break the thing this crate is for.
 #
-# It does not cost the SIMD. `std` is the only default `simdutf8` has, and the
-# vector paths are not behind a feature at all: runtime detected on x86, and
-# the aarch64 module is `#[cfg(target_arch = "aarch64")]` with no feature gate.
-# Turning defaults off wholesale is the mistake that looks identical to this
-# and is not, because on other crates it does take the SIMD with it.
-simdutf8 = { version = "0.1", default-features = false, optional = true }
+# It does not cost the SIMD, and on this fork that is true on x86 too.
+# Upstream reaches for `std::is_x86_feature_detected!`, so a `no_std` build
+# there gets whatever `target_feature` was set at compile time, which is
+# usually scalar. `ps-simdutf8` asks `cpuid` through `cpufeatures` instead, so
+# the fastest implementation is still chosen at run time with no operating
+# system involved. On aarch64 both are the same: NEON is baseline and the
+# module is `#[cfg(target_arch = "aarch64")]` with no feature gate.
+#
+# The package is renamed and the library is not, so `use simdutf8::...` and
+# the `simdutf8::basic::from_utf8` call in `proto::message` are unchanged.
+simdutf8 = { package = "ps-simdutf8", version = "0.1.5", default-features = false, optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
