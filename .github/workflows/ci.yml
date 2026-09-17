@@ -14,16 +14,24 @@ jobs:
         rust: [stable, '1.85.0']
     steps:
       - uses: actions/checkout@v4
+      - name: Clone the sibling path dependencies
+        run: |
+          git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
+          git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
       - run: cargo check --lib --no-default-features
 
   hosted:
-    name: Hosted tests and guide examples
+    name: Hosted tests
     runs-on: ubicloud-standard-2
     steps:
       - uses: actions/checkout@v4
+      - name: Clone the sibling path dependencies
+        run: |
+          git clone --depth 1 https://github.com/pathscale/nagoya.git ../nagoya
+          git clone --depth 1 https://github.com/pathscale/nago-rustls.git ../nago-rustls
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
