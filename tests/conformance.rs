@@ -117,36 +117,6 @@ fn case_2_5_a_fragmented_ping_is_a_protocol_error() {
     );
 }
 
-// --- 3.x and 4.x  reserved bits and opcodes -------------------------------
-
-#[test]
-fn case_3_1_a_reserved_bit_is_a_protocol_error() {
-    for bit in [0x40u8, 0x20, 0x10] {
-        let mut wire = frame(OpCode::Text, true, b"x");
-        wire[0] |= bit;
-        let mut a = assembler();
-        assert_eq!(
-            feed(&mut a, &wire),
-            Err(Fault::Frame(FrameError::ReservedBitSet)),
-            "accepted reserved bit {bit:#04x}"
-        );
-    }
-}
-
-#[test]
-fn case_4_1_a_reserved_opcode_is_a_protocol_error() {
-    for opcode in [0x3u8, 0x4, 0x5, 0x6, 0x7, 0xB, 0xC, 0xD, 0xE, 0xF] {
-        let mut wire = frame(OpCode::Text, true, b"x");
-        wire[0] = 0x80 | opcode;
-        let mut a = assembler();
-        assert_eq!(
-            feed(&mut a, &wire),
-            Err(Fault::Frame(FrameError::ReservedOpCode(opcode))),
-            "accepted reserved opcode {opcode:#x}"
-        );
-    }
-}
-
 // --- 5.x  fragmentation ---------------------------------------------------
 
 #[test]
@@ -1197,4 +1167,124 @@ fn case_7_1_5_a_close_abandons_a_fragmented_message() {
         None,
         "a fragmented message completed after a close"
     );
+}
+
+// --- 3.x and 4.x in bulk --------------------------------------------------
+//
+// Reserved bits and reserved opcodes are rejected for the same reason: this
+// endpoint negotiates no extension, so a peer that sets either is speaking a
+// protocol that was never agreed to. Autobahn checks that at every position
+// one can appear, which is a small cross product rather than a list.
+
+/// Every frame kind a reserved bit or opcode can ride on.
+const EVERY_OPCODE: &[OpCode] = &[
+    OpCode::Continuation,
+    OpCode::Text,
+    OpCode::Binary,
+    OpCode::Close,
+    OpCode::Ping,
+    OpCode::Pong,
+];
+
+#[test]
+fn case_3_1_to_3_7_every_combination_of_reserved_bits_is_refused() {
+    // Seven combinations: each bit alone, each pair, and all three. A codec
+    // that masks one bit at a time and forgets to check the rest passes the
+    // three singles and fails here.
+    for bits in 1u8..=7 {
+        let encoded = bits << 4;
+        for &opcode in EVERY_OPCODE {
+            let mut wire = frame(opcode, true, b"x");
+            wire[0] |= encoded;
+            let mut a = assembler();
+            assert_eq!(
+                feed(&mut a, &wire),
+                Err(Fault::Frame(FrameError::ReservedBitSet)),
+                "accepted reserved bits {encoded:#04x} on {opcode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn case_3_x_a_reserved_bit_is_refused_before_anything_else_is_judged() {
+    // The bit is set on a frame that is also wrong in a second way. The
+    // reserved bit must still be what catches it, because it is judged from
+    // the first byte and nothing later should be reached.
+    let mut a = assembler();
+
+    // A continuation with nothing open, which would otherwise be a protocol
+    // error one layer up.
+    let mut wire = frame(OpCode::Continuation, true, b"x");
+    wire[0] |= 0x40;
+    assert_eq!(
+        feed(&mut a, &wire),
+        Err(Fault::Frame(FrameError::ReservedBitSet))
+    );
+
+    // Text that is not UTF-8, which would otherwise be caught during assembly.
+    let mut wire = frame(OpCode::Text, true, &[0xFF]);
+    wire[0] |= 0x20;
+    assert_eq!(
+        feed(&mut a, &wire),
+        Err(Fault::Frame(FrameError::ReservedBitSet))
+    );
+}
+
+#[test]
+fn case_3_x_a_reserved_bit_is_refused_inside_a_fragmented_message() {
+    // The message opened legally; the continuation carries the bit. An
+    // implementation that checks the first frame of a message and then trusts
+    // the rest passes everything above and fails this.
+    let mut a = assembler();
+    assert_eq!(
+        feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(),
+        None
+    );
+
+    let mut wire = frame(OpCode::Continuation, true, b"b");
+    wire[0] |= 0x40;
+    assert_eq!(
+        feed(&mut a, &wire),
+        Err(Fault::Frame(FrameError::ReservedBitSet))
+    );
+}
+
+#[test]
+fn case_4_1_x_and_4_2_x_every_reserved_opcode_is_refused_either_way() {
+    // 0x3 to 0x7 are reserved data opcodes and 0xB to 0xF reserved control
+    // opcodes. Both ranges are refused, and the FIN bit does not change that:
+    // a reserved opcode is unknown, so there is no way to know what a fragment
+    // of one would even mean.
+    for opcode in [0x3u8, 0x4, 0x5, 0x6, 0x7, 0xB, 0xC, 0xD, 0xE, 0xF] {
+        for fin in [true, false] {
+            let mut wire = frame(OpCode::Text, fin, b"x");
+            wire[0] = (if fin { 0x80 } else { 0x00 }) | opcode;
+            let mut a = assembler();
+            assert_eq!(
+                feed(&mut a, &wire),
+                Err(Fault::Frame(FrameError::ReservedOpCode(opcode))),
+                "accepted reserved opcode {opcode:#x} with fin={fin}"
+            );
+        }
+    }
+}
+
+#[test]
+fn case_4_x_a_reserved_opcode_is_refused_inside_a_fragmented_message() {
+    for opcode in [0x3u8, 0xB] {
+        let mut a = assembler();
+        assert_eq!(
+            feed(&mut a, &frame(OpCode::Text, false, b"a")).unwrap(),
+            None
+        );
+
+        let mut wire = frame(OpCode::Text, true, b"b");
+        wire[0] = 0x80 | opcode;
+        assert_eq!(
+            feed(&mut a, &wire),
+            Err(Fault::Frame(FrameError::ReservedOpCode(opcode))),
+            "accepted reserved opcode {opcode:#x} inside a fragmented message"
+        );
+    }
 }

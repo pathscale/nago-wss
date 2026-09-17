@@ -142,7 +142,7 @@ The reactor:
 
 The connection joins the two, enforcing the masking rules in both directions.
 
-Conformance: 55 tests run under `cargo test`, covering Autobahn's sections 1
+Conformance: 58 tests run under `cargo test`, covering Autobahn's sections 1
 through 7 and the shape of 9. Fragmentation and its interleaving rules,
 reserved bits and opcodes, control frame limits, the close code registry over
 the whole u16 space, every length encoding boundary as text and as binary and
