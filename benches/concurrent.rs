@@ -36,11 +36,15 @@ use nagoya::reactor::{Reactor, TcpListener, TcpStream};
 /// How many connections to run at once, in successive rounds.
 const COUNTS: [usize; 3] = [1, 8, 32];
 /// Messages each connection sends.
-const PER_CONNECTION: usize = 20;
+const PER_CONNECTION: usize = 50;
 /// Payload size, in the range the fleet's RPC traffic actually uses.
 const PAYLOAD: usize = 256;
 /// Samples per count; the best is reported.
-const SAMPLES: usize = 1;
+// One sample of twenty messages was noise: the same arm came out ahead and
+// behind on consecutive runs, which is a benchmark reporting scheduler jitter
+// rather than throughput. The whole thing ran in under a tenth of a second, so
+// there was no reason for either number to be this small.
+const SAMPLES: usize = 3;
 
 fn best(mut values: Vec<Duration>) -> Duration {
     values.sort_unstable();

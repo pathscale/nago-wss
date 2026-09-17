@@ -103,17 +103,30 @@ fn stats(mut values: Vec<Duration>) -> Stats {
 // --- nago-wss -------------------------------------------------------------
 
 /// One round trip sample: `ROUND_TRIPS` echoes, one at a time.
+///
+/// Both ends use `Reactor::local`, which polls the future on the thread that
+/// returned from the kernel. The threaded reactor hands the wakeup to another
+/// thread, and a park and an unpark is about 3.2us, paid once per message.
+/// That is most of what this benchmark used to measure, and it is avoidable
+/// rather than inherent: one thread driving the connections it owns is the
+/// shape a WebSocket server wants anyway. The tokio arm is a current thread
+/// runtime, so this is the like for like comparison.
 fn nago_round_trip() -> Duration {
-    let reactor = Reactor::start().expect("reactor");
+    use nagoya::reactor::block_on_with;
+
+    let reactor = Reactor::local().expect("reactor");
     let handle = reactor.handle();
     let listener = TcpListener::bind(local_addr(), &handle).expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_handle = handle.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        nagoya::block_on(async move {
+        let reactor = Reactor::local().expect("reactor");
+        block_on_with(&reactor, async move {
+            // Signal before accepting, so the client cannot connect to a
+            // listener that is not being polled yet.
+            ready_tx.send(()).expect("signal");
             let (stream, _) = listener.accept().await.expect("accept");
-            drop(server_handle);
             let mut conn = Connection::new(stream, Role::Server, Limits::default());
             for _ in 0..ROUND_TRIPS {
                 let message = conn.read().await.expect("read").expect("message");
@@ -122,7 +135,8 @@ fn nago_round_trip() -> Duration {
         });
     });
 
-    let elapsed = nagoya::block_on(async {
+    ready_rx.recv().expect("server ready");
+    let elapsed = block_on_with(&reactor, async {
         let stream = TcpStream::connect(addr, &handle).await.expect("connect");
         let mut conn = Connection::new(stream, Role::Client, Limits::default());
         let payload = Bytes::from_static(SMALL);
