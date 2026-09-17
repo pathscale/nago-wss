@@ -1,11 +1,12 @@
 //! RFC 6455 conformance, as tests rather than an external suite.
 //!
-//! # Why this exists as well as Autobahn
+//! # Why this exists rather than Autobahn
 //!
-//! Autobahn runs in CI and passes, which settles whether this crate is
-//! conformant. It does not help while writing the crate: it needs a container
-//! runtime and a live server, it takes a minute and a half, and a failure
-//! arrives as a case number in an HTML report.
+//! Autobahn ships only as a container, and this repo carries no container
+//! runtime, so the published suite is not run here at all. It would not be the
+//! right tool during development either: it needs a live server, it takes a
+//! minute and a half, and a failure arrives as a case number in an HTML
+//! report.
 //!
 //! Underneath, the suite is a list of byte sequences and the behaviour each
 //! one should produce, and the behaviour is what matters. So the rules are

@@ -226,23 +226,30 @@ The connection, over whatever `nagoya::reactor` or a TLS session provides:
   reading into a `BytesMut`'s uninitialised tail, and writing a frame header and
   its payload without joining them
 
-Conformance is 58 tests under `cargo test`, with no suite, no server and no
-sockets, written straight against the protocol core.
+Conformance: **the Autobahn cases are ported, 58 tests under `cargo test`.**
+No container, no server, no sockets, no runtime. The published suite ships only
+as a Docker image, so rather than carry one, the rules it encodes are written
+directly against the protocol core, numbered after Autobahn's own cases so each
+one can be read against its published description.
 
-The Autobahn suite is not part of this repo. It ships only as a container, and
-nothing here requires one: `examples/autobahn_server.rs` remains, so anyone who
-wants to point that suite at this crate can, but it is not a dependency of the
-build, the tests or CI, and no result from it is claimed here.
+Where a section is large and mechanical the rule is written out and the cases
+generated from it, which covers more sequences than the published list does:
+section 6 alone is twenty nine malformed UTF-8 sequences in four contexts,
+about three hundred and eighty assertions, against the hundred and forty five
+cases the suite ships.
 
-Sections 12 and 13 would be excluded in any case. They are
-`permessage-deflate`, which this crate does not implement: no extension is
-negotiated, so a peer that sets a reserved bit is speaking a protocol that was
-never agreed to and the frame is refused. That is the right answer to those
-cases, but the suite scores them against a compressor. They exist because a
-failure there names a rule and points at a line, rather than a case number in
-an HTML report. Most are generated from the rule rather than transcribed from
-a case list, so they cover more sequences than the published suite does: section 6 alone is twenty nine malformed UTF-8 sequences in four
-contexts, about three hundred and eighty assertions, against the hundred and
-forty five cases the suite ships.
+They run in hundredths of a second, they name what they check, and a failure
+points at a line rather than a case number in an HTML report. That is the
+difference that matters while writing the crate.
+
+Sections 12 and 13 are not covered, and would be excluded from the suite in any
+case. They are `permessage-deflate`, which this crate does not implement: no
+extension is negotiated, so a peer that sets a reserved bit is speaking a
+protocol that was never agreed to and the frame is refused. That is the right
+answer to those cases, but the suite scores them against a compressor.
+
+`examples/autobahn_server.rs` remains, so anyone who does want to point the
+published suite at this crate can. Nothing in the build, the tests or CI
+depends on it.
 
 Still to come: the `endpoint-libs` adapter.
