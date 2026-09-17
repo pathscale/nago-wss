@@ -236,6 +236,158 @@ mod tests {
         assert_eq!(accept_for(b"dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
+    /// A well formed request, which the negative cases below mutate.
+    fn good_request() -> String {
+        "GET /chat HTTP/1.1\r\n\
+         Host: example.com\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\r\n"
+            .to_string()
+    }
+
+    #[test]
+    fn parses_a_well_formed_upgrade() {
+        let request = parse_request(good_request().as_bytes(), DEFAULT_MAX_HEAD).unwrap();
+        assert_eq!(request.path, "/chat");
+        assert_eq!(request.key, b"dGhlIHNhbXBsZSBub25jZQ==");
+        assert!(request.protocols.is_empty());
+    }
+
+    #[test]
+    fn finds_the_end_of_a_head_and_waits_for_the_rest() {
+        let full = good_request();
+        assert_eq!(head_end(full.as_bytes()), Some(full.len()));
+        // A head that has not finished arriving must report absent rather than
+        // parsing what is there.
+        assert_eq!(head_end(&full.as_bytes()[..40]), None);
+        // Bare LF, which plenty of clients and test scripts send.
+        assert_eq!(head_end(b"GET / HTTP/1.1\n\n"), Some(16));
+    }
+
+    #[test]
+    fn header_names_are_case_insensitive() {
+        let request = "GET / HTTP/1.1\r\n\
+             HOST: example.com\r\n\
+             upgrade: WebSocket\r\n\
+             CoNnEcTiOn: Upgrade\r\n\
+             sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             SEC-WEBSOCKET-VERSION: 13\r\n\r\n";
+        assert!(parse_request(request.as_bytes(), DEFAULT_MAX_HEAD).is_ok());
+    }
+
+    #[test]
+    fn accepts_connection_with_other_tokens_alongside_upgrade() {
+        // Proxies add tokens to this header; requiring it to equal "Upgrade"
+        // exactly breaks real clients.
+        let request = good_request().replace("Connection: Upgrade", "Connection: keep-alive, Upgrade");
+        assert!(parse_request(request.as_bytes(), DEFAULT_MAX_HEAD).is_ok());
+    }
+
+    #[test]
+    fn collects_offered_subprotocols_in_order() {
+        let request = good_request().replace(
+            "Sec-WebSocket-Version: 13",
+            "Sec-WebSocket-Protocol: mcp, chat\r\nSec-WebSocket-Version: 13",
+        );
+        let parsed = parse_request(request.as_bytes(), DEFAULT_MAX_HEAD).unwrap();
+        assert_eq!(parsed.protocols, ["mcp", "chat"]);
+    }
+
+    #[test]
+    fn rejects_requests_that_are_not_upgrades() {
+        let cases = [
+            (good_request().replace("GET", "POST"), UpgradeError::NotGet),
+            (
+                good_request().replace("Upgrade: websocket\r\n", ""),
+                UpgradeError::NotAnUpgrade,
+            ),
+            (
+                good_request().replace("Connection: Upgrade\r\n", ""),
+                UpgradeError::NotAnUpgrade,
+            ),
+            (
+                good_request().replace("Version: 13", "Version: 8"),
+                UpgradeError::WrongVersion,
+            ),
+            (
+                good_request().replace("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n", ""),
+                UpgradeError::BadKey,
+            ),
+            (
+                // Right shape, wrong length: 16 bytes of base64 is 24 chars.
+                good_request().replace("dGhlIHNhbXBsZSBub25jZQ==", "c2hvcnQ="),
+                UpgradeError::BadKey,
+            ),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(
+                parse_request(request.as_bytes(), DEFAULT_MAX_HEAD),
+                Err(expected),
+                "accepted a request it should have refused"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_an_oversized_head() {
+        // The guard that stops a peer growing the buffer forever by never
+        // sending the blank line.
+        let mut request = good_request();
+        request.push_str(&"X-Padding: x\r\n".repeat(4096));
+        assert_eq!(
+            parse_request(request.as_bytes(), DEFAULT_MAX_HEAD),
+            Err(UpgradeError::HeadTooLarge)
+        );
+    }
+
+    #[test]
+    fn a_response_completes_the_handshake_the_client_started() {
+        let key = new_key([7u8; 16]);
+        let request = build_request("/chat", "example.com", &key, &["mcp"], &[]);
+
+        let parsed = parse_request(&request, DEFAULT_MAX_HEAD).expect("own request rejected");
+        assert_eq!(parsed.path, "/chat");
+        assert_eq!(parsed.protocols, ["mcp"]);
+
+        let response = build_response(&parsed.key, Some("mcp"));
+        let protocol = check_response(&response, &key).expect("own response rejected");
+        assert_eq!(protocol.as_deref(), Some("mcp"));
+    }
+
+    #[test]
+    fn a_client_rejects_a_response_with_the_wrong_accept() {
+        // The check that stops a cache or a confused proxy from completing a
+        // handshake it did not understand.
+        let key = new_key([1u8; 16]);
+        let other = new_key([2u8; 16]);
+        let response = build_response(other.as_bytes(), None);
+        assert_eq!(check_response(&response, &key), Err(UpgradeError::BadKey));
+    }
+
+    #[test]
+    fn a_client_rejects_a_non_101_response() {
+        let key = new_key([3u8; 16]);
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(
+            check_response(response, &key),
+            Err(UpgradeError::NotAnUpgrade)
+        );
+    }
+
+    #[test]
+    fn rejections_name_a_status_a_client_can_act_on() {
+        let version = build_rejection(UpgradeError::WrongVersion);
+        let text = core::str::from_utf8(&version).unwrap();
+        assert!(text.starts_with("HTTP/1.1 426"), "{text}");
+        // 426 must say which version would work, per RFC 6455 4.4.
+        assert!(text.contains("Sec-WebSocket-Version: 13"), "{text}");
+
+        let bad = build_rejection(UpgradeError::NotGet);
+        assert!(core::str::from_utf8(&bad).unwrap().starts_with("HTTP/1.1 400"));
+    }
+
     #[test]
     fn validates_key_shape() {
         assert!(is_valid_key(b"dGhlIHNhbXBsZSBub25jZQ=="));
@@ -244,4 +396,266 @@ mod tests {
         // Right length, but not base64.
         assert!(!is_valid_key(b"!!!!!!!!!!!!!!!!!!!!!!=="));
     }
+}
+
+// --- the HTTP upgrade -----------------------------------------------------
+
+/// Why an upgrade request was not acceptable.
+///
+/// A server answers every one of these with a plain HTTP error rather than a
+/// WebSocket frame, since by definition no WebSocket exists yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeError {
+    /// The request head was not valid HTTP, or a header line had no colon.
+    Malformed,
+    /// The method was not GET. §4.2.1 requires it.
+    NotGet,
+    /// `Upgrade: websocket` or `Connection: Upgrade` was missing.
+    NotAnUpgrade,
+    /// `Sec-WebSocket-Version` was absent or not 13.
+    WrongVersion,
+    /// `Sec-WebSocket-Key` was absent or not 16 bytes of base64.
+    BadKey,
+    /// The head was longer than the caller's limit, which is a denial of
+    /// service guard rather than a protocol rule: a peer that never sends the
+    /// terminating blank line would otherwise grow the buffer forever.
+    HeadTooLarge,
+}
+
+/// The largest request head this will parse, unless the caller says otherwise.
+///
+/// Generous for real traffic (cookies and auth headers are the large ones) and
+/// small enough that ten thousand half-open connections cannot exhaust memory.
+pub const DEFAULT_MAX_HEAD: usize = 16 * 1024;
+
+/// What a server needs out of a client's upgrade request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// The path requested, which routing may care about.
+    pub path: String,
+    /// The value to echo back through [`accept_for`].
+    pub key: Vec<u8>,
+    /// The subprotocols the client offered, in its order of preference.
+    pub protocols: Vec<String>,
+}
+
+/// Find the end of an HTTP head.
+///
+/// Returns the offset just past the terminating blank line, or `None` if the
+/// head has not fully arrived. Scanning for this before parsing is what makes
+/// the parse work on a stream rather than needing the whole request at once.
+pub fn head_end(input: &[u8]) -> Option<usize> {
+    // A bare LF pair is tolerated as well as CRLF: some clients and many test
+    // scripts send it, and rejecting them buys nothing.
+    input
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| at + 4)
+        .or_else(|| {
+            input
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|at| at + 2)
+        })
+}
+
+/// Parse a client's upgrade request.
+///
+/// `input` must contain a complete head, as found by [`head_end`].
+pub fn parse_request(input: &[u8], max_head: usize) -> Result<Request, UpgradeError> {
+    if input.len() > max_head {
+        return Err(UpgradeError::HeadTooLarge);
+    }
+
+    let text = core::str::from_utf8(input).map_err(|_| UpgradeError::Malformed)?;
+    let mut lines = text.split('\n').map(|line| line.trim_end_matches('\r'));
+
+    // Request line: GET <path> HTTP/1.1
+    let start = lines.next().ok_or(UpgradeError::Malformed)?;
+    let mut parts = start.split(' ');
+    let method = parts.next().ok_or(UpgradeError::Malformed)?;
+    let path = parts.next().ok_or(UpgradeError::Malformed)?;
+    if !method.eq_ignore_ascii_case("GET") {
+        return Err(UpgradeError::NotGet);
+    }
+
+    let mut upgrade_seen = false;
+    let mut connection_seen = false;
+    let mut version_ok = false;
+    let mut key: Option<Vec<u8>> = None;
+    let mut protocols = Vec::new();
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').ok_or(UpgradeError::Malformed)?;
+        let value = value.trim();
+
+        // Header names are case insensitive, and real clients vary.
+        if name.eq_ignore_ascii_case("upgrade") {
+            upgrade_seen = value.eq_ignore_ascii_case("websocket");
+        } else if name.eq_ignore_ascii_case("connection") {
+            // The value is a comma separated list and `Upgrade` may sit
+            // anywhere in it; some proxies add `keep-alive` alongside.
+            connection_seen = value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+        } else if name.eq_ignore_ascii_case("sec-websocket-version") {
+            version_ok = value == "13";
+        } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+            key = Some(value.as_bytes().to_vec());
+        } else if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            protocols.extend(
+                value
+                    .split(',')
+                    .map(|token| token.trim().to_string())
+                    .filter(|token| !token.is_empty()),
+            );
+        }
+    }
+
+    if !upgrade_seen || !connection_seen {
+        return Err(UpgradeError::NotAnUpgrade);
+    }
+    if !version_ok {
+        return Err(UpgradeError::WrongVersion);
+    }
+    let key = key.ok_or(UpgradeError::BadKey)?;
+    if !is_valid_key(&key) {
+        return Err(UpgradeError::BadKey);
+    }
+
+    Ok(Request {
+        path: path.to_string(),
+        key,
+        protocols,
+    })
+}
+
+/// Build the 101 response that completes the handshake.
+///
+/// `protocol` names the subprotocol the server selected, which must be one the
+/// client offered; `None` selects none, which is always legal.
+pub fn build_response(key: &[u8], protocol: Option<&str>) -> Vec<u8> {
+    let accept = accept_for(key);
+    let mut out = String::with_capacity(160);
+    out.push_str("HTTP/1.1 101 Switching Protocols\r\n");
+    out.push_str("Upgrade: websocket\r\n");
+    out.push_str("Connection: Upgrade\r\n");
+    out.push_str("Sec-WebSocket-Accept: ");
+    out.push_str(&accept);
+    out.push_str("\r\n");
+    if let Some(protocol) = protocol {
+        out.push_str("Sec-WebSocket-Protocol: ");
+        out.push_str(protocol);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// Build the plain HTTP refusal for a request that cannot be upgraded.
+///
+/// A WebSocket client sees the status and gives up, which is the point: the
+/// alternative is leaving the connection open while it waits for frames that
+/// are never coming.
+pub fn build_rejection(error: UpgradeError) -> Vec<u8> {
+    let (status, reason) = match error {
+        UpgradeError::WrongVersion => ("426 Upgrade Required", "Sec-WebSocket-Version: 13\r\n"),
+        UpgradeError::HeadTooLarge => ("431 Request Header Fields Too Large", ""),
+        _ => ("400 Bad Request", ""),
+    };
+    let mut out = String::with_capacity(96);
+    out.push_str("HTTP/1.1 ");
+    out.push_str(status);
+    out.push_str("\r\n");
+    out.push_str(reason);
+    out.push_str("Connection: close\r\n");
+    out.push_str("Content-Length: 0\r\n\r\n");
+    out.into_bytes()
+}
+
+/// Build a client's upgrade request.
+///
+/// `key` should come from [`new_key`]; `host` is what the server will match
+/// against its own name, and is required by §4.1.
+pub fn build_request(
+    path: &str,
+    host: &str,
+    key: &str,
+    protocols: &[&str],
+    extra: &[(&str, &str)],
+) -> Vec<u8> {
+    let mut out = String::with_capacity(160);
+    out.push_str("GET ");
+    out.push_str(path);
+    out.push_str(" HTTP/1.1\r\nHost: ");
+    out.push_str(host);
+    out.push_str("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ");
+    out.push_str(key);
+    out.push_str("\r\nSec-WebSocket-Version: 13\r\n");
+    if !protocols.is_empty() {
+        out.push_str("Sec-WebSocket-Protocol: ");
+        out.push_str(&protocols.join(", "));
+        out.push_str("\r\n");
+    }
+    for (name, value) in extra {
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// Check a server's response against the key that was sent.
+///
+/// The accept value is the only thing that proves the peer understood the
+/// handshake rather than being a cache or a proxy replaying a 101 it liked the
+/// look of, so it is checked rather than assumed.
+pub fn check_response(input: &[u8], key: &str) -> Result<Option<String>, UpgradeError> {
+    let text = core::str::from_utf8(input).map_err(|_| UpgradeError::Malformed)?;
+    let mut lines = text.split('\n').map(|line| line.trim_end_matches('\r'));
+
+    let status = lines.next().ok_or(UpgradeError::Malformed)?;
+    if !status.contains("101") {
+        return Err(UpgradeError::NotAnUpgrade);
+    }
+
+    let expected = accept_for(key.as_bytes());
+    let mut accept_ok = false;
+    let mut protocol = None;
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("sec-websocket-accept") {
+            accept_ok = value == expected;
+        } else if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            protocol = Some(value.to_string());
+        }
+    }
+
+    if !accept_ok {
+        return Err(UpgradeError::BadKey);
+    }
+    Ok(protocol)
+}
+
+/// Generate a `Sec-WebSocket-Key` from 16 bytes of caller-supplied randomness.
+///
+/// The randomness is a parameter rather than taken from a generator here for
+/// the same reason the masking key is: this module does no I/O, and a key that
+/// silently came from a weak source would be worse than one the caller had to
+/// think about. §4.1 wants it unpredictable so a cache cannot replay a
+/// handshake, not secret.
+pub fn new_key(entropy: [u8; 16]) -> String {
+    base64_encode(&entropy)
 }

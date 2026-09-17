@@ -49,3 +49,7 @@ pub mod reactor;
 /// A live WebSocket connection, where the protocol meets the reactor.
 #[cfg(feature = "reactor")]
 pub mod conn;
+
+/// Performing the opening handshake over a socket.
+#[cfg(feature = "reactor")]
+pub mod upgrade;

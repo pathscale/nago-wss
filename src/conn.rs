@@ -78,6 +78,8 @@ pub enum Error {
     MaskingViolation,
     /// The peer closed the connection without a closing handshake.
     UnexpectedEof,
+    /// The opening handshake failed.
+    Upgrade(crate::proto::handshake::UpgradeError),
 }
 
 impl From<Errno> for Error {
@@ -94,6 +96,7 @@ impl core::fmt::Display for Error {
             Self::Protocol(error) => write!(formatter, "protocol: {error:?}"),
             Self::MaskingViolation => formatter.write_str("masking rule violated"),
             Self::UnexpectedEof => formatter.write_str("closed without a handshake"),
+            Self::Upgrade(error) => write!(formatter, "upgrade: {error:?}"),
         }
     }
 }
@@ -142,11 +145,28 @@ impl Connection {
     /// The handshake is the caller's business; by the time a `Connection`
     /// exists, both sides have agreed to speak WebSocket.
     pub fn new(stream: TcpStream, role: Role, limits: Limits) -> Self {
+        Self::with_buffered(stream, role, limits, BytesMut::new())
+    }
+
+    /// Wrap a stream, carrying bytes already read past the handshake.
+    ///
+    /// A client often sends its first frames in the same segment as its
+    /// upgrade request, so those bytes have already left the socket by the
+    /// time the handshake finishes. Dropping them would lose the first message
+    /// of every fast client.
+    pub fn with_buffered(
+        stream: TcpStream,
+        role: Role,
+        limits: Limits,
+        buffered: BytesMut,
+    ) -> Self {
+        let mut read_buffer = BytesMut::with_capacity(READ_CHUNK);
+        read_buffer.extend_from_slice(&buffered);
         Self {
             stream,
             role,
             assembler: Assembler::new(limits),
-            read_buffer: BytesMut::with_capacity(READ_CHUNK),
+            read_buffer,
             // Sized for a typical RPC payload. A larger message grows this
             // once and then keeps it, and only a client ever uses it at all,
             // since a server writes its payload without copying.
