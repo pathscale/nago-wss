@@ -412,6 +412,8 @@ dependencies = [
 [[package]]
 name = "nago-rustls"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89df09bc38f982bd2b54f6f8a5409ee3dd19b907be363ee436caab9bf10a9ee9"
 dependencies = [
  "nagoya",
  "rustls",
@@ -438,6 +440,8 @@ dependencies = [
 [[package]]
 name = "nagoya"
 version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51e5c447ac5f01b67e5772708e9603f176df44c614dac18e6f9d6c69b165e00a"
 dependencies = [
  "async-task",
  "bytes",
