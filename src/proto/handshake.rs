@@ -14,7 +14,7 @@
 //! complete a WebSocket handshake, and SHA-1's collision weaknesses do not
 //! bear on that. This is not a general purpose hash and must not be used as one.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// The GUID from RFC 6455 §1.3, concatenated with the client key before hashing.
