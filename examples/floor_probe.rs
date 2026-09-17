@@ -428,6 +428,153 @@ fn thread_handoff() -> f64 {
     elapsed.as_secs_f64() / HOPS as f64 * 1e6
 }
 
+/// What one `kevent` wait costs when an event is already pending.
+///
+/// The reactor does one of these per round trip. If it is expensive, that is
+/// the gap; if it is not, the gap is in what surrounds it.
+fn kevent_with_event_ready() -> f64 {
+    const CALLS: usize = 20_000;
+
+    let (client, server) = pair();
+    client.set_nonblocking(true).expect("nonblocking");
+
+    let kq = unsafe { libc::kqueue() };
+    let change = libc::kevent {
+        ident: client.as_raw_fd() as usize,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    unsafe {
+        libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null());
+    }
+
+    // One byte sitting unread, so every wait returns immediately. This
+    // measures the syscall and the event copy, not any waiting.
+    use std::io::Write;
+    let mut writer = server;
+    writer.write_all(b"x").expect("write");
+
+    let mut events: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
+    let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+
+    let start = Instant::now();
+    for _ in 0..CALLS {
+        unsafe {
+            libc::kevent(kq, std::ptr::null(), 0, events.as_mut_ptr(), 64, &timeout);
+        }
+    }
+    let elapsed = start.elapsed();
+
+    unsafe { libc::close(kq) };
+    drop(client);
+    drop(writer);
+    elapsed.as_secs_f64() / CALLS as f64 * 1e6
+}
+
+/// A mutex lock and unlock, which the reactor does twice per wakeup: once to
+/// park the waker, once to take it back out.
+fn mutex_pair() -> f64 {
+    use std::sync::Mutex;
+    const CALLS: usize = 200_000;
+    let lock = Mutex::new(0u64);
+    let start = Instant::now();
+    for _ in 0..CALLS {
+        *lock.lock().expect("lock") += 1;
+    }
+    start.elapsed().as_secs_f64() / CALLS as f64 * 1e6
+}
+
+/// Reading nagoya's clock, which `service_timers` does on every pass.
+fn clock_read() -> f64 {
+    const CALLS: usize = 200_000;
+    let start = Instant::now();
+    for _ in 0..CALLS {
+        std::hint::black_box(nagoya::now_ns());
+    }
+    start.elapsed().as_secs_f64() / CALLS as f64 * 1e6
+}
+
+/// How many syscalls a round trip actually makes, counted rather than
+/// reasoned about.
+///
+/// Both arms are timed against a known count of `getpid`, so the figure is in
+/// syscall-equivalents rather than microseconds: it says how many trips into
+/// the kernel each design is paying for, which is the thing that would
+/// explain a gap the individual pieces do not.
+fn syscalls_per_round_trip() -> (f64, f64) {
+    // A read that returns EWOULDBLOCK, then a kevent, then the real read:
+    // three calls, which is what the reactor does when data has not arrived
+    // yet. tokio does the same, so any difference is in how often each one
+    // guesses wrong.
+    const TRIPS: usize = 20_000;
+
+    let (client, server) = pair();
+    client.set_nonblocking(true).expect("nonblocking");
+
+    let kq = unsafe { libc::kqueue() };
+    let change = libc::kevent {
+        ident: client.as_raw_fd() as usize,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD | libc::EV_CLEAR,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    unsafe {
+        libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null());
+    }
+
+    let echo = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut server = server;
+        let mut byte = [0u8; 1];
+        for _ in 0..TRIPS {
+            if server.read(&mut byte).expect("read") == 0 {
+                break;
+            }
+            server.write_all(&byte).expect("write");
+        }
+    });
+
+    // Optimistic: try the read first and only wait when it blocks. This is
+    // what this crate does.
+    use std::io::{Read, Write};
+    let mut client = client;
+    let mut byte = [0u8; 1];
+    let mut waits = 0u64;
+
+    let start = Instant::now();
+    for _ in 0..TRIPS {
+        client.write_all(b"x").expect("write");
+        loop {
+            match client.read(&mut byte) {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    waits += 1;
+                    let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+                    unsafe {
+                        libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null());
+                    }
+                }
+                Err(error) => panic!("read failed: {error}"),
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+
+    unsafe { libc::close(kq) };
+    drop(client);
+    echo.join().expect("echo");
+
+    (
+        elapsed.as_secs_f64() / TRIPS as f64 * 1e6,
+        waits as f64 / TRIPS as f64,
+    )
+}
+
 fn main() {
     // Warm every path.
     let _ = raw_libc_syscalls();
@@ -489,6 +636,18 @@ fn main() {
     println!("  park/unpark round trip between two threads:");
     println!("    {handoff:>8.3} us  <- paid once per message by a reactor");
     println!("                 that polls on a different thread\n");
+
+    let (trip, waits) = syscalls_per_round_trip();
+    println!("  optimistic read then wait:");
+    println!("    {trip:>8.2} us/trip, {waits:.2} waits per trip");
+    println!("    (1.00 means the read always blocked and the wait was needed)");
+    println!();
+
+    println!("  what the reactor does per round trip:");
+    println!("    kevent, event ready  {:>8.3} us", kevent_with_event_ready());
+    println!("    mutex lock/unlock    {:>8.4} us  (x2 per wakeup)", mutex_pair());
+    println!("    nagoya clock read    {:>8.4} us", clock_read());
+    println!();
 
     println!("  cost of zeroing a read buffer, which std::io::Read's");
     println!("  signature requires before every read:");

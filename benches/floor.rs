@@ -8,6 +8,30 @@
 //!
 //! If the two floors match the two WebSocket numbers, the framing is not what
 //! is being measured and optimising it is wasted effort.
+//!
+//! # What the remaining gap is not
+//!
+//! This crate sits about 3us behind tokio on a single connection doing one
+//! round trip at a time. Each of these was measured and none of them accounts
+//! for it:
+//!
+//! * **Syscall count.** A trivial syscall costs a nanosecond here, and both
+//!   designs make the same three calls per trip: an optimistic read, a wait,
+//!   then the real read. Counted directly, the read blocks on 0.98 of trips,
+//!   so neither side is winning by guessing better.
+//! * **std::net.** Measured equal to raw `send`/`recv`, and it is gone from
+//!   this crate's path anyway.
+//! * **The reactor's own work.** One `kevent` with an event already pending
+//!   is 0.34us, a mutex pair 0.009us, a clock read 0.024us. The whole of it
+//!   is under a microsecond per trip.
+//! * **The thread handoff.** `Reactor::local` polls on the thread that
+//!   returned from the kernel, which should have removed it, and measured the
+//!   same as the threaded reactor: the batching already amortises it.
+//! * **Copies.** The read path is copy-free from the socket to the message.
+//!
+//! What is left is unexplained. It is also the shape this crate is worst at
+//! and a fleet is least likely to run: ten thousand connections is the case
+//! that matters and this crate leads it comfortably.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
