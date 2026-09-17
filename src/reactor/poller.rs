@@ -28,7 +28,7 @@
 // relying on.
 #![allow(unsafe_code)]
 
-use super::error::{Errno, Result};
+use super::error::Result;
 
 /// What a caller is waiting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,7 @@ fn check(value: i32) -> Result<i32> {
     target_os = "dragonfly"
 ))]
 mod sys {
-    use super::super::error::{Errno, Result};
+    use super::super::error::Result;
     use super::{check, Event, Interest};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -326,7 +326,7 @@ mod sys {
 
 #[cfg(target_os = "linux")]
 mod sys {
-    use super::super::error::{Errno, Result};
+    use super::super::error::Result;
     use super::{check, Event, Interest};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 

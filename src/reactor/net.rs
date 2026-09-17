@@ -29,7 +29,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 
 use super::driver::{Handle, Registration};
-use super::error::{Errno, Result};
+use super::error::Result;
 use super::poller::Interest;
 use super::socket::{Addr, TcpListener as Listener, TcpSocket};
 
