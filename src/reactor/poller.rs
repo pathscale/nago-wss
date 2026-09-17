@@ -503,35 +503,9 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use crate::reactor::testing::{socket_pair, write_byte};
+    use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
-
-    /// A connected pair of non-blocking sockets, for driving real readiness.
-    fn socket_pair() -> (OwnedFd, OwnedFd) {
-        let mut fds = [0i32; 2];
-        // SAFETY: `fds` is a live array of two ints, which is what socketpair
-        // fills. Test-only.
-        let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-        assert_eq!(result, 0, "socketpair failed");
-        for fd in fds {
-            // SAFETY: `fd` is a descriptor socketpair just returned.
-            unsafe {
-                let flags = libc::fcntl(fd, libc::F_GETFL);
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
-        // SAFETY: both descriptors are fresh and owned exclusively here.
-        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
-    }
-
-    fn write_byte(fd: &OwnedFd) {
-        let byte = b"x";
-        // SAFETY: writing one byte from a live buffer to a valid descriptor.
-        let written = unsafe {
-            libc::write(fd.as_raw_fd(), byte.as_ptr().cast::<libc::c_void>(), 1)
-        };
-        assert_eq!(written, 1, "write failed");
-    }
 
     #[test]
     fn reports_readability_only_after_data_arrives() {
