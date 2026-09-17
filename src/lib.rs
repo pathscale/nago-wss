@@ -57,3 +57,7 @@ pub mod upgrade;
 /// TLS, for `wss://`.
 #[cfg(feature = "tls")]
 pub mod tls;
+
+/// Opening a connection from a URL.
+#[cfg(feature = "reactor")]
+pub mod client;

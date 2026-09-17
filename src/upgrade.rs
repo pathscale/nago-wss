@@ -14,7 +14,7 @@ use crate::proto::handshake::{
     parse_request, Request, UpgradeError, DEFAULT_MAX_HEAD,
 };
 use crate::proto::message::Limits;
-use crate::reactor::net::TcpStream;
+use crate::reactor::bytes::ByteStream;
 
 impl From<UpgradeError> for Error {
     fn from(value: UpgradeError) -> Self {
@@ -27,8 +27,8 @@ impl From<UpgradeError> for Error {
 /// A client may send its first frames in the same segment as the request, so
 /// the bytes beyond the head are kept rather than discarded: throwing them
 /// away loses the first message of every fast client.
-async fn read_head(
-    stream: &mut TcpStream,
+async fn read_head<S: ByteStream>(
+    stream: &mut S,
     max_head: usize,
 ) -> Result<(Vec<u8>, BytesMut), Error> {
     let mut buffer = BytesMut::with_capacity(2 * 1024);
@@ -62,12 +62,13 @@ async fn read_head(
 /// On a request that cannot be upgraded, the HTTP refusal is written before
 /// returning, so the client learns why instead of waiting for frames that will
 /// never arrive.
-pub async fn accept<F>(
-    mut stream: TcpStream,
+pub async fn accept<S, F>(
+    mut stream: S,
     limits: Limits,
     select: F,
-) -> Result<(Connection, Request), Error>
+) -> Result<(Connection<S>, Request), Error>
 where
+    S: ByteStream,
     F: FnOnce(&[alloc::string::String]) -> Option<alloc::string::String>,
 {
     let (head, rest) = read_head(&mut stream, DEFAULT_MAX_HEAD).await?;
@@ -98,15 +99,15 @@ where
 /// because this crate does no I/O of its own and will not reach for a
 /// generator behind the caller's back; §4.1 wants the key unpredictable so a
 /// cache cannot replay a handshake, not secret.
-pub async fn connect(
-    mut stream: TcpStream,
+pub async fn connect<S: ByteStream>(
+    mut stream: S,
     path: &str,
     host: &str,
     protocols: &[&str],
     headers: &[(&str, &str)],
     entropy: [u8; 16],
     limits: Limits,
-) -> Result<(Connection, Option<alloc::string::String>), Error> {
+) -> Result<(Connection<S>, Option<alloc::string::String>), Error> {
     let key = new_key(entropy);
     let request = build_request(path, host, &key, protocols, headers);
     stream.write_all(&request).await?;
@@ -125,7 +126,7 @@ mod tests {
     use super::*;
     use crate::proto::message::Message;
     use crate::reactor::socket::Addr;
-    use crate::reactor::{Reactor, TcpListener};
+    use crate::reactor::{Reactor, TcpListener, TcpStream};
     use bytes::Bytes;
 
     #[test]

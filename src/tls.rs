@@ -41,31 +41,8 @@ use std::io::{Read as _, Write as _};
 
 use rustls::{ClientConnection, ServerConnection};
 
+use crate::reactor::bytes::ByteStream;
 use crate::reactor::error::{Errno, Result};
-
-/// Somewhere to read ciphertext from and write it to.
-///
-/// The whole of what the TLS loop needs from a transport. Deliberately two
-/// methods: anything larger would couple this to a particular socket, and the
-/// point is that it is not.
-#[allow(async_fn_in_trait)]
-pub trait ByteStream {
-    /// Read ciphertext into `buffer`, returning zero at end of stream.
-    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize>;
-
-    /// Write all of `buffer`.
-    async fn write_all(&mut self, buffer: &[u8]) -> Result<()>;
-}
-
-impl ByteStream for crate::reactor::net::TcpStream {
-    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        Self::read(self, buffer).await
-    }
-
-    async fn write_all(&mut self, buffer: &[u8]) -> Result<()> {
-        Self::write_all(self, buffer).await
-    }
-}
 
 /// A TLS session over a reactor socket.
 ///
@@ -277,6 +254,18 @@ impl<S: ByteStream> TlsStream<S> {
     /// The stream underneath, for a caller that needs its address.
     pub fn get_ref(&self) -> &S {
         &self.stream
+    }
+}
+
+/// A TLS session is itself a byte stream, which is the whole point: a
+/// WebSocket connection cannot tell whether it is speaking through one.
+impl<S: ByteStream> ByteStream for TlsStream<S> {
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        Self::read(self, buffer).await
+    }
+
+    async fn write_all(&mut self, buffer: &[u8]) -> Result<()> {
+        Self::write_all(self, buffer).await
     }
 }
 

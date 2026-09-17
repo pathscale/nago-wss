@@ -44,8 +44,8 @@ use crate::proto::frame::{FrameError, Header};
 use crate::proto::message::{Assembler, Limits, Message, ProtocolError};
 use crate::proto::opcode::{CloseCode, OpCode};
 use crate::proto::{mask, message::CloseFrame};
+use crate::reactor::bytes::ByteStream;
 use crate::reactor::error::Errno;
-use crate::reactor::net::TcpStream;
 #[cfg(test)]
 use crate::reactor::socket::Addr;
 
@@ -80,6 +80,8 @@ pub enum Error {
     UnexpectedEof,
     /// The opening handshake failed.
     Upgrade(crate::proto::handshake::UpgradeError),
+    /// The URL could not be used.
+    Url(&'static str),
 }
 
 impl From<Errno> for Error {
@@ -97,6 +99,7 @@ impl core::fmt::Display for Error {
             Self::MaskingViolation => formatter.write_str("masking rule violated"),
             Self::UnexpectedEof => formatter.write_str("closed without a handshake"),
             Self::Upgrade(error) => write!(formatter, "upgrade: {error:?}"),
+            Self::Url(reason) => write!(formatter, "url: {reason}"),
         }
     }
 }
@@ -121,8 +124,8 @@ const READ_CHUNK: usize = 16 * 1024;
 
 /// A live WebSocket connection.
 #[derive(Debug)]
-pub struct Connection {
-    stream: TcpStream,
+pub struct Connection<S = crate::reactor::net::TcpStream> {
+    stream: S,
     role: Role,
     assembler: Assembler,
     /// Unparsed bytes from the socket.
@@ -139,12 +142,12 @@ pub struct Connection {
     close_sent: bool,
 }
 
-impl Connection {
+impl<S: ByteStream> Connection<S> {
     /// Wrap an already upgraded stream.
     ///
     /// The handshake is the caller's business; by the time a `Connection`
     /// exists, both sides have agreed to speak WebSocket.
-    pub fn new(stream: TcpStream, role: Role, limits: Limits) -> Self {
+    pub fn new(stream: S, role: Role, limits: Limits) -> Self {
         Self::with_buffered(stream, role, limits, BytesMut::new())
     }
 
@@ -155,7 +158,7 @@ impl Connection {
     /// time the handshake finishes. Dropping them would lose the first message
     /// of every fast client.
     pub fn with_buffered(
-        stream: TcpStream,
+        stream: S,
         role: Role,
         limits: Limits,
         buffered: BytesMut,
