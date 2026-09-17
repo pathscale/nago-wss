@@ -11,12 +11,23 @@ categories = ["network-programming", "web-programming::websocket", "no-std"]
 
 [features]
 # The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
-default = ["std"]
+default = ["std", "reactor"]
 std = []
+# The readiness reactor: kqueue/epoll, sockets, and the futures over them.
+# Needs `std` for `io::Error` and owned descriptors.
+reactor = ["std", "dep:libc", "dep:nagoya"]
 
 [dependencies]
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
+
+# The platform, for the reactor only. A crate wrapping libc is still a crate
+# that links no Rust std of its own; the ban is on std, and the platform already
+# provides libc. Same version the house uses in ekostd.
+libc = { version = "^0.2.189", default-features = false, optional = true }
+# The scheduler, sync and time this crate does not implement. Nagoya ships no
+# I/O driver on purpose, which is why the reactor below is ours and not its.
+nagoya = { path = "../nagoya", optional = true }
 
 [dev-dependencies]

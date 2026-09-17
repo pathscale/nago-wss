@@ -12,6 +12,10 @@
 //! objects and no allocation per frame on either path, so a reactor calling
 //! into this pays nothing for the layering.
 
+// The protocol core keeps the stronger guarantee the crate root relaxes: there
+// is no reason to touch raw memory to parse a frame, so nothing here may.
+#![forbid(unsafe_code)]
+
 pub mod frame;
 pub mod mask;
 pub mod opcode;

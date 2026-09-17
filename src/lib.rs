@@ -31,10 +31,17 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
-#![forbid(unsafe_code)]
+// Denied rather than forbidden, so that exactly one module can opt out and say
+// why. `proto` is unsafe-free and stays that way; the syscall bindings in
+// `reactor::poller` cannot be, since calling the kernel is the whole job.
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
 pub mod proto;
 
 pub use proto::{CloseCode, FrameError, Header, OpCode};
+
+/// The I/O side. See the module for why the reactor lives here.
+#[cfg(feature = "reactor")]
+pub mod reactor;
