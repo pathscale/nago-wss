@@ -56,10 +56,16 @@ value. It is not a general-purpose hash and should not be used as one.
 
 ## Numbers
 
-Re-measured 2026-09-17 on an idle 16 core M-series laptop, after the reactor
+Re-measured 2026-09-18 on an idle 16 core M-series laptop, after the reactor
 moved to nagoya. Rates are operations per second; the three arms are this
 crate, tungstenite (what the fleet runs today) and sockudo-ws, each through its
 own public entry point.
+
+Every arm now connects to a `SocketAddr` directly. The tokio arms used to
+connect by URL, which put the system resolver in front of the socket: that is
+not what any of this is measuring, and with a VPN holding DNS it turned a one
+second benchmark into a multi minute one. Numbers taken before that was fixed
+penalised the tokio arms and should not be compared against these.
 
 Run them with `cargo bench --features simd-utf8`. The earlier table here was
 taken on a machine under heavy load and every figure in it was low by roughly
@@ -121,11 +127,11 @@ Both ends in one process, so every arm is handicapped the same way.
 
 | | establish | broadcast | memory |
 |---|---|---|---|
-| nago-wss | **0.44 s** | **88.2 ms** | 43.6 KB/conn |
-| tokio-tungstenite | 0.78 s | 324.8 ms | 151.5 KB/conn |
-| sockudo-ws | 1.18 s | 296.4 ms | **35.4 KB/conn** |
+| nago-wss | **0.42 s** | **94.8 ms** | 43.6 KB/conn |
+| tokio-tungstenite | 0.73 s | 419.9 ms | 151.5 KB/conn |
+| sockudo-ws | 1.12 s | 281.6 ms | **35.4 KB/conn** |
 
-Broadcast is 3.7x tokio-tungstenite's and establish 1.8x, on 3.5x less memory.
+Broadcast is 4.4x tokio-tungstenite's and establish 1.7x, on 3.5x less memory.
 This is the most repeatable result here: broadcast has measured between 85 and
 89ms across every run since reactor wakes were routed to the worker holding
 each descriptor, against 95 to 99ms before it.
@@ -136,9 +142,9 @@ Aggregate throughput, 256 byte echo, messages per second.
 
 | connections | nago-wss | tokio-tungstenite | sockudo-ws |
 |---|---|---|---|
-| 1 | 12,685 | 14,401 | **15,237** |
-| 8 | 125,049 | **169,566** | 154,974 |
-| 32 | 174,436 | **175,511** | 139,126 |
+| 1 | **18,979** | 16,715 | 18,444 |
+| 8 | 137,151 | **186,643** | 153,721 |
+| 32 | 168,731 | **181,905** | 134,774 |
 
 **Read this table with suspicion.** The same binary on an idle machine has
 produced 90k and 182k at eight connections on consecutive runs, so a single
@@ -152,9 +158,8 @@ the one a fleet actually runs.
 
 ### Where this loses
 
-A single connection doing one round trip at a time on loopback: 20.2us against
-tokio-tungstenite's 17.0 and sockudo-ws's 15.3. Streaming small payloads is
-worse, 1.54us against tokio's 0.59 at 64 bytes.
+A single connection doing one round trip at a time on loopback: 19.1us against
+tokio-tungstenite's 17.1 and sockudo-ws's 15.1, so 1.13x and 1.30x behind.
 
 Most of that is neither crate's, and most of the rest is one thing: a reactor
 that polls on a different thread from the one the kernel returned to pays a
