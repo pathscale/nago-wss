@@ -139,6 +139,88 @@ fn nago_round(count: usize) -> Duration {
     elapsed
 }
 
+/// The same round, with the clients on the server's reactor rather than one
+/// each.
+///
+/// # Why both shapes are here
+///
+/// `nago_round` gives every client thread its own `reactor::block_on`, and
+/// that call starts a reactor: eight connections means eight client threads
+/// and eight reactor threads, on top of the server's. The tokio arm starts one
+/// runtime and puts its server and all its clients on it. So the two arms were
+/// not running the same experiment, and a gap between them could have been the
+/// harness rather than the crate.
+///
+/// This arm removes that difference: the clients are tasks on the shared pool,
+/// their sockets are registered on the server's reactor, and the process holds
+/// one reactor in total. If the gap narrows here, part of what `nago_round`
+/// reported was the cost of the extra reactors.
+fn nago_shared_round(count: usize) -> Duration {
+    let reactor = Reactor::start().expect("reactor");
+    let handle = reactor.handle();
+    let listener = TcpListener::bind(Addr::localhost(0), &handle).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_handle = handle.clone();
+    let server = std::thread::spawn(move || {
+        nagoya::block_on(async move {
+            let mut streams = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (stream, _) = listener.accept().await.expect("accept");
+                streams.push(stream);
+            }
+            drop(server_handle);
+
+            let mut handles = Vec::with_capacity(count);
+            for stream in streams {
+                handles.push(nagoya::runtime::background().spawn(async move {
+                    let mut conn = Connection::new(stream, Role::Server, Limits::default());
+                    for _ in 0..PER_CONNECTION {
+                        let Some(message) = conn.read().await.expect("read") else {
+                            break;
+                        };
+                        conn.write(message).await.expect("write");
+                    }
+                }));
+            }
+            for handle in handles {
+                handle.await;
+            }
+        });
+    });
+
+    let payload = Bytes::from(vec![0x5Au8; PAYLOAD]);
+    let start = Instant::now();
+
+    let clients = std::thread::spawn(move || {
+        nagoya::block_on(async move {
+            let mut handles = Vec::with_capacity(count);
+            for _ in 0..count {
+                let handle = handle.clone();
+                let payload = payload.clone();
+                handles.push(nagoya::runtime::background().spawn(async move {
+                    let stream = TcpStream::connect(addr, &handle).await.expect("connect");
+                    let mut conn = Connection::new(stream, Role::Client, Limits::default());
+                    for _ in 0..PER_CONNECTION {
+                        conn.write(Message::Binary(payload.clone()))
+                            .await
+                            .expect("write");
+                        let _ = conn.read().await.expect("read").expect("message");
+                    }
+                }));
+            }
+            for handle in handles {
+                handle.await;
+            }
+        });
+    });
+    clients.join().expect("clients");
+    let elapsed = start.elapsed();
+
+    server.join().expect("server");
+    elapsed
+}
+
 // --- tokio-tungstenite ----------------------------------------------------
 
 mod tokio_arm {
@@ -357,13 +439,14 @@ mod sockudo_arm {
 fn main() {
     // Warm both arms on the smallest count.
     let _ = nago_round(1);
+    let _ = nago_shared_round(1);
     let _ = tokio_arm::round(1);
     let _ = sockudo_arm::round(1);
 
     println!("\naggregate throughput, {PAYLOAD} byte echo, best of {SAMPLES}\n");
     println!(
-        "  {:>6}  {:>14}  {:>14}  {:>8}",
-        "conns", "nago-wss", "tokio-tung", "sockudo-ws"
+        "  {:>6}  {:>14}  {:>14}  {:>14}  {:>8}",
+        "conns", "nago-wss", "nago shared", "tokio-tung", "sockudo-ws"
     );
 
     for count in COUNTS {
@@ -371,12 +454,14 @@ fn main() {
         let rate = |d: Duration| total as f64 / d.as_secs_f64();
 
         let nago = best((0..SAMPLES).map(|_| nago_round(count)).collect());
+        let shared = best((0..SAMPLES).map(|_| nago_shared_round(count)).collect());
         let tokio = best((0..SAMPLES).map(|_| tokio_arm::round(count)).collect());
 
         let sockudo = best((0..SAMPLES).map(|_| sockudo_arm::round(count)).collect());
         println!(
-            "  {count:>6}  {:>11.0} m/s  {:>11.0} m/s  {:>11.0} m/s",
+            "  {count:>6}  {:>11.0} m/s  {:>11.0} m/s  {:>11.0} m/s  {:>11.0} m/s",
             rate(nago),
+            rate(shared),
             rate(tokio),
             rate(sockudo),
         );
