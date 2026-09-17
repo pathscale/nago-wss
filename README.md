@@ -67,14 +67,18 @@ than hidden behind a single figure.
 ### Reproducing
 
 ```sh
-cargo bench --features simd-utf8
+cargo bench
 ```
 
 Or one at a time, with `--bench micro`, `--bench echo`, `--bench concurrent`,
 `--bench scale`, `--bench floor`.
 
-`micro` requires `--features simd-utf8` and refuses to build without it, so it
-cannot silently measure the scalar fallback instead of the vector path.
+`micro` requires `simd-utf8`, which is on by default, so it cannot silently
+measure the scalar fallback instead of the vector path. That feature is worth
+having on: measured against `core::str::from_utf8` over the same 16 KiB
+buffers, 57.37 GB/s becomes 115.84 on ASCII and 2.56 GB/s becomes 13.49 on
+mixed text. Turning it off with `default-features = false` is for a consumer
+that will not carry `unsafe`, and costs only speed.
 
 Every arm connects to a `SocketAddr` directly. The tokio arms used to connect
 by URL, which put the system resolver in front of the socket: with a VPN
