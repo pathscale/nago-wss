@@ -33,7 +33,7 @@ webpki-roots = ["tls", "nago-rustls/webpki-roots"]
 # this crate does not: it is the standard library's validator with vector
 # instructions, and on this machine it is between four and thirteen times
 # faster on the text frames that have to be checked.
-simdutf8 = { version = "0.1", default-features = false, optional = true }
+simdutf8 = { version = "0.1", optional = true }
 # Payload ownership. `Bytes` is what endpoint-libs' WireMessage already carries,
 # so a frame payload crosses the seam without a copy or a reallocation.
 bytes = { version = "1.7", default-features = false }
