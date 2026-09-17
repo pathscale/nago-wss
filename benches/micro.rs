@@ -171,7 +171,10 @@ fn main() {
         let seconds = measure(|| {
             black_box(header.encode(black_box(&mut out)));
         });
-        report("encode header (server)", size, seconds);
+        // No size column: this writes at most fourteen bytes and never looks
+        // at the payload, so dividing by the payload size would report a
+        // throughput it never achieved.
+        report(&format!("encode header ({size} B frame)"), 0, seconds);
     }
     for size in SIZES {
         let payload = vec![0x5Au8; size];
@@ -205,7 +208,53 @@ fn main() {
                     .expect("accept"),
             );
         });
-        report("assemble message", size, seconds);
+        // Reported without a size for the same reason as the header: a
+        // single-frame message hands its payload straight through, so the
+        // work is constant and a per-byte figure would flatter it.
+        report(&format!("assemble ({size} B, unfragmented)"), 0, seconds);
+    }
+    println!();
+
+    // A whole message end to end, which is the number that compares against
+    // fleet traffic. Everything above is a stage; this is a client encoding a
+    // frame and a server decoding and assembling it, which is what one
+    // message actually costs in CPU with no socket in the way.
+    println!("  a full message, encode then decode then assemble:");
+    for size in SIZES {
+        let payload = Bytes::from(vec![0x5Au8; size]);
+        let key = [0x37, 0xfa, 0x21, 0x3d];
+        let header = Header {
+            fin: true,
+            opcode: OpCode::Binary,
+            mask: Some(key),
+            payload_len: size as u64,
+        };
+        let mut wire = vec![0u8; Header::MAX_ENCODED_LEN + size];
+        let mut assembler = Assembler::new(Limits::default());
+
+        let seconds = measure(|| {
+            // Client side: encode the header, copy the payload, mask it.
+            let mut head = [0u8; Header::MAX_ENCODED_LEN];
+            let header_len = header.encode(&mut head).expect("encode");
+            wire[..header_len].copy_from_slice(&head[..header_len]);
+            wire[header_len..header_len + size].copy_from_slice(&payload);
+            mask::apply(&mut wire[header_len..header_len + size], key, 0);
+
+            // Server side: decode the header, unmask, reassemble.
+            let (decoded, at) = Header::decode(&wire, u64::MAX)
+                .expect("decode")
+                .expect("complete");
+            let mut body = wire[at..at + size].to_vec();
+            if let Some(key) = decoded.mask {
+                mask::apply(&mut body, key, 0);
+            }
+            black_box(
+                assembler
+                    .accept(decoded.opcode, decoded.fin, Bytes::from(body))
+                    .expect("accept"),
+            );
+        });
+        report("full message", size, seconds);
     }
     println!();
 
