@@ -1,19 +1,22 @@
 //! RFC 6455 conformance, as tests rather than an external suite.
 //!
-//! # Why not Autobahn
+//! # Why this exists as well as Autobahn
 //!
-//! Autobahn is the standard conformance suite and it ships as a Docker image
-//! driving a live server. That is a container runtime as a dependency for
-//! something that is, underneath, a list of byte sequences and the behaviour
-//! each one should produce.
+//! Autobahn runs in CI and passes, which settles whether this crate is
+//! conformant. It does not help while writing the crate: it needs a container
+//! runtime and a live server, it takes a minute and a half, and a failure
+//! arrives as a case number in an HTML report.
 //!
-//! The behaviour is what matters, so the cases are written directly against
-//! the protocol core: no server, no sockets, no runtime. They run with
-//! `cargo test`, they name what they check, and a failure points at a line
-//! rather than at an HTML report.
+//! Underneath, the suite is a list of byte sequences and the behaviour each
+//! one should produce, and the behaviour is what matters. So the rules are
+//! written directly against the protocol core here: no server, no sockets, no
+//! runtime. They run in hundredths of a second, they name what they check, and
+//! a failure points at a line.
 //!
 //! Numbered after Autobahn's own cases where one matches, so a case here can
-//! be read against its published description.
+//! be read against its published description. Where a section is large and
+//! mechanical the rule is written out and the cases generated from it, which
+//! covers more sequences than the published list does.
 
 use bytes::Bytes;
 use nago_wss::proto::frame::{FrameError, Header};

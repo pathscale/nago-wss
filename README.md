@@ -142,24 +142,24 @@ The reactor:
 
 The connection joins the two, enforcing the masking rules in both directions.
 
-Conformance: 58 tests run under `cargo test`, covering Autobahn's sections 1
-through 7 and the shape of 9. Fragmentation and its interleaving rules,
-reserved bits and opcodes, control frame limits, the close code registry over
-the whole u16 space, every length encoding boundary as text and as binary and
-whole and fragmented, the first and last codepoint of each UTF-8 width,
-truncated and overlong and surrogate sequences, and what happens to anything
-sent after a close.
+Conformance: **the Autobahn suite passes, 301 of 301 cases.** It runs in CI on
+every push, against the echo server in `examples/autobahn_server.rs`, and the
+report is kept as a build artifact. `autobahn/README.md` has the command to run
+it yourself.
 
-Most of it is generated from the rule rather than transcribed from the case
-list, so it covers more sequences than Autobahn publishes: section 6 alone is
-twenty nine malformed sequences in four contexts, around three hundred and
-eighty assertions, against the hundred and forty five cases the suite ships.
-Sections 12 and 13 are skipped deliberately: they are `permessage-deflate`,
-which is not implemented here, and a reserved bit is a hard error.
+Sections 12 and 13 are excluded and nothing else is. They are
+`permessage-deflate`, which this crate does not implement: no extension is
+negotiated, so a peer that sets a reserved bit is speaking a protocol that was
+never agreed to and the frame is refused. That is the right answer to those
+cases, but the suite scores them against a compressor.
 
-**Autobahn itself has not been run.** It ships as a Docker image and `wstest`
-needs Python 2, so these cases are written from its specifications rather than
-driven by it. The rules are covered, but a suite catches what its author did
-not think to test, and this one cannot make that claim.
+Alongside it, 58 tests run under `cargo test` with no suite, no server and no
+sockets, written straight against the protocol core. They exist because a
+failure there names a rule and points at a line, where Autobahn points at a
+case number in an HTML report. Most are generated from the rule rather than
+transcribed from the case list, so they cover more sequences than Autobahn
+publishes: section 6 alone is twenty nine malformed UTF-8 sequences in four
+contexts, about three hundred and eighty assertions, against the hundred and
+forty five cases the suite ships.
 
 Still to come: the `endpoint-libs` adapter.
