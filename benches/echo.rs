@@ -169,11 +169,12 @@ fn nago_stream(payload_len: usize) -> Duration {
         let payload = Bytes::from(vec![0x5Au8; payload_len]);
 
         let start = Instant::now();
-        for _ in 0..STREAM_MESSAGES {
-            conn.write(Message::Binary(payload.clone()))
-                .await
-                .expect("write");
-        }
+        // The whole burst is handed over at once, which is what lets the
+        // connection coalesce it. A caller with one message still uses
+        // `write`, which is unchanged.
+        conn.write_all((0..STREAM_MESSAGES).map(|_| Message::Binary(payload.clone())))
+            .await
+            .expect("write_all");
         start
     });
 
@@ -415,6 +416,22 @@ fn per_op(duration: Duration, operations: usize) -> f64 {
 
 /// Whether two arms' sample ranges overlap, in which case their ordering is an
 /// artefact of scheduling rather than a property of the code.
+/// Messages per second, grouped, because the fleet level question is how many
+/// messages a second a process moves rather than how many microseconds one of
+/// them took. The two are the same number and only one of them is readable at
+/// a glance.
+fn thousands(value: f64) -> String {
+    let whole = format!("{:.0}", value);
+    let mut out = String::new();
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 fn overlaps(a: Stats, b: Stats) -> bool {
     a.best <= b.worst && b.best <= a.worst
 }
@@ -422,9 +439,11 @@ fn overlaps(a: Stats, b: Stats) -> bool {
 fn report(name: &str, arms: &[(&str, Stats)], operations: usize) {
     println!("{name}");
     for (label, arm) in arms {
+        let median = per_op(arm.median, operations);
         println!(
-            "  {label:<20} {:>8.2} us/op  (best {:.2}, worst {:.2})",
-            per_op(arm.median, operations),
+            "  {label:<20} {:>8.2} us/op  {:>12} msg/s  (best {:.2}, worst {:.2})",
+            median,
+            thousands(1e6 / median),
             per_op(arm.best, operations),
             per_op(arm.worst, operations),
         );
