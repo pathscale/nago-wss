@@ -333,6 +333,106 @@ fn buffer_zeroing(size: usize) -> f64 {
     start.elapsed().as_secs_f64() / REPEATS as f64 * 1e6
 }
 
+/// How long a wake-to-poll round trip costs with no I/O in it at all.
+///
+/// The reactor's job on each event is: wake a waker, have the executor poll
+/// the task, and get back into the wait. This measures that cycle alone, by
+/// bouncing a task between two wakes, so the scheduler's contribution can be
+/// separated from anything the socket is doing.
+fn wake_latency() -> f64 {
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const HOPS: usize = 20_000;
+
+    /// A future that yields `HOPS` times, waking itself each time. Each yield
+    /// is one full wake, reschedule and poll.
+    struct Yielder(usize);
+    impl Future for Yielder {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 == 0 {
+                return Poll::Ready(());
+            }
+            self.0 -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let _ = counter;
+
+    let start = Instant::now();
+    nagoya::block_on(Yielder(HOPS));
+    start.elapsed().as_secs_f64() / HOPS as f64 * 1e6
+}
+
+/// The same, on tokio, for comparison.
+fn tokio_wake_latency() -> f64 {
+    const HOPS: usize = 20_000;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let start = Instant::now();
+        for _ in 0..HOPS {
+            tokio::task::yield_now().await;
+        }
+        start.elapsed().as_secs_f64() / HOPS as f64 * 1e6
+    })
+}
+
+/// What one thread handing off to another costs.
+///
+/// This crate's reactor runs on its own thread: it returns from `kevent`,
+/// wakes a waker, and the task polls on a different thread. tokio's
+/// current-thread runtime returns from `kevent` and polls on the same one.
+/// That difference is a park and an unpark per message, and this measures it.
+fn thread_handoff() -> f64 {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    const HOPS: usize = 20_000;
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let back = Arc::new(AtomicBool::new(false));
+
+    let their_flag = Arc::clone(&flag);
+    let their_back = Arc::clone(&back);
+    let main_thread = std::thread::current();
+
+    let worker = std::thread::spawn(move || {
+        let mut parked = std::thread::current();
+        let _ = &mut parked;
+        for _ in 0..HOPS {
+            while !their_flag.swap(false, Ordering::AcqRel) {
+                std::thread::park();
+            }
+            their_back.store(true, Ordering::Release);
+            main_thread.unpark();
+        }
+    });
+
+    // The worker needs this thread's handle to unpark it, which it captured
+    // above; here the ping half just drives the cycle.
+    let worker_thread = worker.thread().clone();
+    let start = Instant::now();
+    for _ in 0..HOPS {
+        flag.store(true, Ordering::Release);
+        worker_thread.unpark();
+        while !back.swap(false, Ordering::AcqRel) {
+            std::thread::park();
+        }
+    }
+    let elapsed = start.elapsed();
+    worker.join().expect("worker");
+    elapsed.as_secs_f64() / HOPS as f64 * 1e6
+}
+
 fn main() {
     // Warm every path.
     let _ = raw_libc_syscalls();
@@ -383,6 +483,17 @@ fn main() {
         "  a syscall is {:.4}us, so the {raw:.2}us is not syscall count:\n           it is the kernel scheduling two threads through a socket.\n",
         syscall
     );
+
+    let nago_wake = (0..3).map(|_| wake_latency()).fold(f64::MAX, f64::min);
+    let tokio_wake = (0..3).map(|_| tokio_wake_latency()).fold(f64::MAX, f64::min);
+    println!("  wake and repoll, no I/O at all:");
+    println!("    nagoya block_on  {nago_wake:>8.4} us/hop");
+    println!("    tokio            {tokio_wake:>8.4} us/hop\n");
+
+    let handoff = (0..3).map(|_| thread_handoff()).fold(f64::MAX, f64::min);
+    println!("  park/unpark round trip between two threads:");
+    println!("    {handoff:>8.3} us  <- paid once per message by a reactor");
+    println!("                 that polls on a different thread\n");
 
     println!("  cost of zeroing a read buffer, which std::io::Read's");
     println!("  signature requires before every read:");
