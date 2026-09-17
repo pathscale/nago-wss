@@ -22,3 +22,4 @@ pub use message::{Assembler, CloseFrame, Limits, Message, ProtocolError};
 pub use opcode::{CloseCode, OpCode};
 
 pub mod message;
+pub mod handshake;
