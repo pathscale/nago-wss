@@ -62,14 +62,19 @@ bytes = { version = "1.7", default-features = false }
 # TLS, as its own crate. The loop that drives rustls turned out to have
 # nothing to do with WebSockets, so it lives in nago-rustls and this crate is
 # one of its consumers rather than its owner.
-nago-rustls = { version = "0.1.1", optional = true }
+# PATH, NOT A VERSION, AND THIS MUST NOT REACH master. Publishing rejects a
+# path dependency, and this repository publishes on a Cargo.toml push to the
+# default branch, so merging this as it stands breaks the release rather than
+# failing loudly somewhere harmless. It is here to measure nago-wss against an
+# unreleased nagoya; the version pins go back before any merge.
+nago-rustls = { path = "../nago-rustls", optional = true }
 
 # The runtime underneath: the scheduler, sync, time, and since 0.1.4 the
 # readiness reactor and its sockets. That reactor was written here and moved
 # there, because generational tokens and edge triggered registration are the
 # same problem for anything that wants a socket, and none of it was about
 # WebSockets.
-nagoya = { version = "0.1.6", features = ["reactor"], optional = true }
+nagoya = { path = "../nagoya", features = ["reactor"], optional = true }
 # Name resolution only. `getaddrinfo` is the one syscall this crate still binds
 # itself, because nagoya has no resolver to take it. Everything else that
 # called the kernel left with the reactor.
@@ -80,7 +85,7 @@ libc = { version = "^0.2.189", default-features = false, optional = true }
 # rather than a plain one because this crate is generic over its transport: a
 # consumer supplies the socket, so only the things here that need a running
 # one name it.
-nagoya = { version = "0.1.6", features = ["reactor"] }
+nagoya = { path = "../nagoya", features = ["reactor"] }
 # Test certificates, generated in process. Same version endpoint-libs uses.
 rcgen = "0.14"
 # The comparison arm, and the only reason these are here. Same version
