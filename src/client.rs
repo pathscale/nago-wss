@@ -381,12 +381,14 @@ mod tests {
                 let mut tls = crate::tls::TlsStream::server(stream, session);
                 tls.handshake().await.expect("tls handshake");
 
-                let (mut conn, request) =
-                    crate::upgrade::accept(tls, Limits::default(), |offered| {
-                        offered.first().cloned()
-                    })
-                    .await
-                    .expect("upgrade");
+                let outcome = crate::upgrade::accept(tls, Limits::default(), &[], |request| {
+                    (request.protocols.first().cloned(), Vec::new())
+                })
+                .await
+                .expect("upgrade");
+                let crate::upgrade::UpgradeOutcome::Upgraded(mut conn, request) = outcome else {
+                    panic!("the client sent an upgrade, so this cannot be a plain request");
+                };
                 assert_eq!(request.path, "/chat");
 
                 let message = conn.read().await.expect("read").expect("message");

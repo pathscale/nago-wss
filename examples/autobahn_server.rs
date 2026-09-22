@@ -61,7 +61,13 @@ async fn serve(stream: nagoya::reactor::TcpStream) -> Result<(), Error> {
         max_message: 32 * 1024 * 1024,
     };
 
-    let (mut conn, _) = nago_wss::upgrade::accept(stream, limits, |_| None).await?;
+    // The suite only ever sends upgrades. A plain request is handed back now
+    // rather than refused, and answering it is the caller's job, so the arm is
+    // here to be explicit that this server has nothing to say to one.
+    let outcome = nago_wss::upgrade::accept(stream, limits, &[], |_| (None, Vec::new())).await?;
+    let nago_wss::upgrade::UpgradeOutcome::Upgraded(mut conn, _) = outcome else {
+        return Ok(());
+    };
 
     loop {
         let message = match conn.read().await {
