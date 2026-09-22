@@ -189,8 +189,9 @@ mod tests {
     use super::*;
     use crate::proto::message::Message;
     use bytes::Bytes;
+    use nagoya::net::{TcpListener, TcpStream};
     use nagoya::reactor::Addr;
-    use nagoya::reactor::{Reactor, TcpListener, TcpStream};
+    use nagoya::reactor::Reactor;
 
     #[test]
     fn a_full_handshake_then_messages() {

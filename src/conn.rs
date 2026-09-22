@@ -149,7 +149,7 @@ const READ_CHUNK: usize = 16 * 1024;
 
 /// A live WebSocket connection.
 #[derive(Debug)]
-pub struct Connection<S = nagoya::reactor::TcpStream> {
+pub struct Connection<S = nagoya::net::TcpStream> {
     stream: S,
     role: Role,
     assembler: Assembler,
@@ -563,7 +563,8 @@ fn encode_close_body(frame: Option<CloseFrame>) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nagoya::reactor::{Reactor, TcpListener};
+    use nagoya::net::TcpListener;
+    use nagoya::reactor::Reactor;
 
     /// `write_all` must deliver every message, and retain nothing.
     ///
@@ -593,7 +594,7 @@ mod tests {
 
         let client_handle = handle.clone();
         nagoya::block_on(async move {
-            let stream = nagoya::reactor::TcpStream::connect(addr, &client_handle)
+            let stream = nagoya::net::TcpStream::connect(addr, &client_handle)
                 .await
                 .expect("connect");
             let mut conn = Connection::new(stream, Role::Client, Limits::default());
@@ -658,7 +659,7 @@ mod tests {
         let expected = sent.clone();
 
         nagoya::block_on(async move {
-            let stream = nagoya::reactor::TcpStream::connect(addr, &client_handle)
+            let stream = nagoya::net::TcpStream::connect(addr, &client_handle)
                 .await
                 .expect("connect");
             let mut conn = Connection::new(stream, Role::Client, Limits::default());
@@ -784,7 +785,7 @@ mod tests {
         let client_handle = handle.clone();
         let client_thread = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let stream = nagoya::reactor::TcpStream::connect(addr, &client_handle)
+                let stream = nagoya::net::TcpStream::connect(addr, &client_handle)
                     .await
                     .expect("connect");
                 client(Connection::new(stream, Role::Client, Limits::default()));
@@ -984,7 +985,7 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let stream = nagoya::reactor::TcpStream::connect(addr, &client_handle)
+                let stream = nagoya::net::TcpStream::connect(addr, &client_handle)
                     .await
                     .expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());
@@ -1023,7 +1024,7 @@ mod tests {
         let client_handle = handle.clone();
         let client = std::thread::spawn(move || {
             nagoya::block_on(async move {
-                let stream = nagoya::reactor::TcpStream::connect(addr, &client_handle)
+                let stream = nagoya::net::TcpStream::connect(addr, &client_handle)
                     .await
                     .expect("connect");
                 let mut client = Connection::new(stream, Role::Client, Limits::default());

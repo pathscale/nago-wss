@@ -21,8 +21,9 @@
 use bytes::Bytes;
 use nago_wss::conn::Error;
 use nago_wss::proto::message::{CloseFrame, Limits, Message};
+use nagoya::net::TcpListener;
 use nagoya::reactor::Addr;
-use nagoya::reactor::{Reactor, TcpListener};
+use nagoya::reactor::Reactor;
 
 fn main() {
     let reactor = Reactor::start().expect("reactor");
@@ -52,7 +53,7 @@ fn main() {
 }
 
 /// Echo until the peer closes or breaks the protocol.
-async fn serve(stream: nagoya::reactor::TcpStream) -> Result<(), Error> {
+async fn serve(stream: nagoya::net::TcpStream) -> Result<(), Error> {
     // The suite sends messages far larger than the default, and a case that
     // is meant to be refused for its content should not be refused for its
     // size instead.
