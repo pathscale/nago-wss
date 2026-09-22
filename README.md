@@ -29,10 +29,10 @@ no spin, and the timer integration still caches the next deadline so a socket
 delivering ten thousand events a second never takes the timer lock to be told
 nothing is due.
 
-What that left behind is a crate with almost no platform in it. The syscall
-bindings went with the reactor, and one `unsafe` block remains: the
-`getaddrinfo` binding in `client`, which turns a hostname into addresses.
-Nagoya has no resolver yet, and that is the only reason it is still here.
+What that left behind is a crate with no platform bindings of its own. The
+syscall bindings went with the reactor, and name resolution followed:
+`client` calls `nagoya::reactor::resolve` and `nagoya::reactor::connect_any`.
+There is no `unsafe` left in this crate.
 
 The split costs nothing at runtime. There are no trait objects across it and no
 per-frame allocation on either path, so the calls into the core monomorphise

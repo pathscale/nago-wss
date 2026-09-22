@@ -75,9 +75,9 @@ nago-rustls = { path = "../nago-rustls", optional = true }
 # same problem for anything that wants a socket, and none of it was about
 # WebSockets.
 nagoya = { path = "../nagoya", features = ["reactor"], optional = true }
-# Name resolution only. `getaddrinfo` is the one syscall this crate still binds
-# itself, because nagoya has no resolver to take it. Everything else that
-# called the kernel left with the reactor.
+# Errno constants the client still names (`EPROTO`, `EAI_NONAME`). Name
+# resolution itself is `nagoya::reactor::resolve`; this crate no longer binds
+# `getaddrinfo`.
 libc = { version = "^0.2.189", default-features = false, optional = true }
 
 [dev-dependencies]
