@@ -17,12 +17,12 @@ use alloc::vec::Vec;
 use crate::conn::{Connection, Error};
 use crate::proto::message::Limits;
 use crate::stream::Errno;
-use nagoya::reactor::connect_any;
-use nagoya::reactor::resolve;
+use nagoya::net::TcpStream;
 use nagoya::reactor::Addr;
 use nagoya::reactor::Handle;
-use nagoya::reactor::ResolveError;
-use nagoya::reactor::TcpStream;
+use nagoya::resolve::connect_any;
+use nagoya::resolve::resolve;
+use nagoya::resolve::ResolveError;
 
 /// A parsed `ws://` or `wss://` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +348,8 @@ mod tests {
         use crate::tls::rustls_pki_types::{CertificateDer, PrivateKeyDer};
         use alloc::sync::Arc;
         use bytes::Bytes;
-        use nagoya::reactor::{Reactor, TcpListener};
+        use nagoya::net::TcpListener;
+        use nagoya::reactor::Reactor;
 
         let issued =
             rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");

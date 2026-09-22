@@ -73,14 +73,14 @@ pub trait StreamExt: ByteStream {
 /// A foreign type, but `StreamExt` is this crate's own trait, so this is the
 /// impl the orphan rule permits. Implementing [`ByteStream`] for it here would
 /// not be, which is why nagoya does that itself.
-impl StreamExt for nagoya::reactor::TcpStream {
+impl StreamExt for nagoya::net::TcpStream {
     async fn read_buf(&mut self, buffer: &mut bytes::BytesMut) -> Result<usize> {
         // Straight into the uninitialised tail, so nothing is zeroed first.
-        nagoya::reactor::TcpStream::read_buf(self, buffer).await
+        nagoya::net::TcpStream::read_buf(self, buffer).await
     }
 
     async fn write_all_vectored(&mut self, header: &[u8], payload: &[u8]) -> Result<()> {
         // Both addresses to the kernel, so the payload is never copied.
-        nagoya::reactor::TcpStream::write_all_vectored(self, header, payload).await
+        nagoya::net::TcpStream::write_all_vectored(self, header, payload).await
     }
 }
