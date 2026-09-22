@@ -11,19 +11,17 @@
 //! SNI name right. Getting any of those wrong is quiet rather than loud, so
 //! they live here once.
 
-// `getaddrinfo` is the platform's resolver and there is no safe binding for
-// it. The unsafe is confined to `resolve` below; everything else here is URL
-// handling.
-#![allow(unsafe_code)]
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::conn::{Connection, Error};
 use crate::proto::message::Limits;
 use crate::stream::Errno;
+use nagoya::reactor::connect_any;
+use nagoya::reactor::resolve;
 use nagoya::reactor::Addr;
 use nagoya::reactor::Handle;
+use nagoya::reactor::ResolveError;
 use nagoya::reactor::TcpStream;
 
 /// A parsed `ws://` or `wss://` URL.
@@ -160,85 +158,14 @@ impl Default for ClientOptions<'_> {
     }
 }
 
-/// Resolve a host to every address the platform offers.
-///
-/// All of them, in the resolver's order, rather than just the first. A host
-/// with both an A and an AAAA record is ordinary, and on a machine where only
-/// one family actually works, taking the first answer fails outright: this is
-/// exactly what `localhost` does when it resolves to `::1` and the listener is
-/// on IPv4. The caller tries them in turn.
-///
-/// Uses `getaddrinfo`, which is the platform's resolver: it honours
-/// `/etc/hosts`, search domains and whatever else the machine is configured
-/// with. Writing a DNS client instead would be a second network stack.
-fn resolve(host: &str, port: u16) -> Result<Vec<Addr>, Error> {
-    let name = alloc::ffi::CString::new(host).map_err(|_| Error::Url("host has a nul byte"))?;
-
-    // SAFETY: an all-zero `addrinfo` is a valid set of hints.
-    let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
-    hints.ai_family = libc::AF_UNSPEC;
-    hints.ai_socktype = libc::SOCK_STREAM;
-
-    let mut result: *mut libc::addrinfo = core::ptr::null_mut();
-    // SAFETY: `name` is a live C string, `hints` a live local, and `result`
-    // receives a list this function frees below.
-    let status = unsafe {
-        libc::getaddrinfo(
-            name.as_ptr(),
-            core::ptr::null(),
-            core::ptr::addr_of!(hints),
-            core::ptr::addr_of_mut!(result),
-        )
-    };
-    if status != 0 || result.is_null() {
-        return Err(Error::Io(Errno(libc::EAI_NONAME)));
-    }
-
-    let mut found = Vec::new();
-    let mut cursor = result;
-    while !cursor.is_null() {
-        // SAFETY: the list is well formed until the null terminator.
-        let entry = unsafe { &*cursor };
-        match entry.ai_family {
-            libc::AF_INET => {
-                // SAFETY: the family says this is a `sockaddr_in`.
-                let addr = unsafe { &*(entry.ai_addr as *const libc::sockaddr_in) };
-                found.push(Addr::V4(addr.sin_addr.s_addr.to_ne_bytes(), port));
-            }
-            libc::AF_INET6 => {
-                // SAFETY: the family says this is a `sockaddr_in6`.
-                let addr = unsafe { &*(entry.ai_addr as *const libc::sockaddr_in6) };
-                found.push(Addr::V6(addr.sin6_addr.s6_addr, port));
-            }
-            // A family this crate does not speak, skipped rather than
-            // guessed at.
-            _ => {}
-        }
-        cursor = entry.ai_next;
-    }
-    // SAFETY: `result` came from `getaddrinfo` and is freed exactly once.
-    unsafe { libc::freeaddrinfo(result) };
-
-    if found.is_empty() {
-        return Err(Error::Io(Errno(libc::EAI_NONAME)));
-    }
-    Ok(found)
-}
-
-/// Connect to the first address that accepts us.
-///
-/// Sequential rather than the parallel racing a browser does: the complexity
-/// of happy eyeballs buys latency on a dual stacked network, and what is
-/// needed here is only that a host answering on one family is reachable.
-async fn connect_any(addrs: &[Addr], handle: &Handle) -> Result<TcpStream, Error> {
-    let mut last = Errno(libc::ECONNREFUSED);
-    for addr in addrs {
-        match TcpStream::connect(*addr, handle).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last = error,
-        }
-    }
-    Err(Error::Io(last))
+fn resolve_host(host: &str, port: u16) -> Result<Vec<Addr>, Error> {
+    resolve(host, port).map_err(|error| match error {
+        ResolveError::Nul => Error::Url("host has a nul byte"),
+        // The code is an `EAI_*`, not an errno. Callers of this crate have
+        // been matching the collapsed `EAI_NONAME`, so that is what they
+        // still see.
+        ResolveError::Failed(_) | ResolveError::Empty => Error::Io(Errno(libc::EAI_NONAME)),
+    })
 }
 
 /// What a successful connection produced.
@@ -255,8 +182,8 @@ pub async fn connect_plain(
     handle: &Handle,
     options: ClientOptions<'_>,
 ) -> Result<Connected<TcpStream>, Error> {
-    let addrs = resolve(&url.host, url.port)?;
-    let stream = connect_any(&addrs, handle).await?;
+    let addrs = resolve_host(&url.host, url.port)?;
+    let stream = connect_any(&addrs, handle).await.map_err(Error::Io)?;
 
     let headers: Vec<(&str, &str)> = options.headers.to_vec();
     let (connection, protocol) = crate::upgrade::connect(
@@ -287,8 +214,8 @@ pub async fn connect_secure(
     // its own and cannot drift from the one nago-rustls links.
     use crate::tls::rustls_pki_types::ServerName;
 
-    let addrs = resolve(&url.host, url.port)?;
-    let stream = connect_any(&addrs, handle).await?;
+    let addrs = resolve_host(&url.host, url.port)?;
+    let stream = connect_any(&addrs, handle).await.map_err(Error::Io)?;
 
     // The default only exists when the trust anchors are bundled. Without
     // `webpki-roots` there is nothing to fall back to, so a caller that did
@@ -501,7 +428,7 @@ mod tests {
     fn resolves_localhost() {
         // Uses the platform resolver, so this also checks that the hosts file
         // path works rather than only DNS.
-        let addrs = resolve("localhost", 1234).expect("localhost did not resolve");
+        let addrs = resolve_host("localhost", 1234).expect("localhost did not resolve");
         assert!(!addrs.is_empty(), "no addresses");
         assert!(addrs.iter().all(|addr| addr.port() == 1234));
     }
@@ -511,7 +438,7 @@ mod tests {
         // localhost is commonly both 127.0.0.1 and ::1. Keeping only the
         // first makes a connection fail whenever the listener is on the other
         // one, which is a bug that only shows up on some machines.
-        let addrs = resolve("localhost", 80).expect("resolve");
+        let addrs = resolve_host("localhost", 80).expect("resolve");
         let v4 = addrs.iter().any(|addr| matches!(addr, Addr::V4(..)));
         let v6 = addrs.iter().any(|addr| matches!(addr, Addr::V6(..)));
         assert!(v4 || v6, "localhost resolved to neither family: {addrs:?}");

@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "nagoya"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-task",
  "bytes",

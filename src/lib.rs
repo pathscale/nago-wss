@@ -29,12 +29,11 @@
 //!
 //! # Unsafe
 //!
-//! One block, in [`client`]: the `getaddrinfo` binding that turns a hostname
-//! into addresses. The syscall bindings that used to sit beside it left with
-//! the reactor. Resolution has not followed yet only because nagoya has no
-//! resolver to follow into, and it is the same kind of thing: anything that
-//! connects to a name needs it, and everyone who writes it writes the same
-//! dual stack bug.
+//! None. The `getaddrinfo` binding that used to live in [`client`] moved to
+//! `nagoya::reactor::resolve` with the rest of name resolution. A second copy
+//! here is how the dual-stack bug comes back: take the first address, and
+//! `localhost` fails whenever that first address is the family the listener
+//! is not on.
 //!
 //! # Only what is used
 //!
@@ -45,9 +44,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
-// Denied rather than forbidden, so that exactly one module can opt out and say
-// why. Everything but the resolver in `client` is unsafe-free, and `proto`
-// forbids it outright.
+// The resolver used to be the one module allowed to opt out. It moved to
+// nagoya, and `proto` forbids unsafe on its own as well.
 #![deny(unsafe_code)]
 
 extern crate alloc;
