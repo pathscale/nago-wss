@@ -2,3 +2,6 @@
 
 # The Autobahn suite writes its report here on every run.
 autobahn/reports/
+
+# A library, so the lock file is not the consumer's and is not committed.
+Cargo.lock
