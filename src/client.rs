@@ -138,7 +138,7 @@ pub struct ClientOptions<'a> {
     /// The TLS configuration, when the URL is `wss://`.
     ///
     /// `None` uses the webpki roots.
-    #[cfg(feature = "tls")]
+    #[cfg(any(feature = "tls", feature = "tls-eko"))]
     pub tls: Option<alloc::sync::Arc<crate::tls::rustls::ClientConfig>>,
 }
 
@@ -152,11 +152,25 @@ impl Default for ClientOptions<'_> {
             // avoid. Named so it is obvious in a stack trace.
             entropy: *b"nago-wss-default",
             limits: Limits::default(),
-            #[cfg(feature = "tls")]
+            #[cfg(any(feature = "tls", feature = "tls-eko"))]
             tls: None,
         }
     }
 }
+
+#[cfg(feature = "reactor")]
+const ERR_EAI_NONAME: i32 = libc::EAI_NONAME;
+#[cfg(all(feature = "eko", not(feature = "reactor")))]
+const ERR_EAI_NONAME: i32 = -2;
+
+#[cfg(all(any(feature = "tls", feature = "tls-eko"), feature = "reactor"))]
+const ERR_EPROTO: i32 = libc::EPROTO;
+#[cfg(all(
+    any(feature = "tls", feature = "tls-eko"),
+    feature = "eko",
+    not(feature = "reactor")
+))]
+const ERR_EPROTO: i32 = eko::libc_lite::EPROTO;
 
 fn resolve_host(host: &str, port: u16) -> Result<Vec<Addr>, Error> {
     resolve(host, port).map_err(|error| match error {
@@ -164,7 +178,7 @@ fn resolve_host(host: &str, port: u16) -> Result<Vec<Addr>, Error> {
         // The code is an `EAI_*`, not an errno. Callers of this crate have
         // been matching the collapsed `EAI_NONAME`, so that is what they
         // still see.
-        ResolveError::Failed(_) | ResolveError::Empty => Error::Io(Errno(libc::EAI_NONAME)),
+        ResolveError::Failed(_) | ResolveError::Empty => Error::Io(Errno(ERR_EAI_NONAME)),
     })
 }
 
@@ -204,7 +218,7 @@ pub async fn connect_plain(
 }
 
 /// Connect to a `wss://` URL.
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "tls-eko"))]
 pub async fn connect_secure(
     url: &Url,
     handle: &Handle,
@@ -221,12 +235,12 @@ pub async fn connect_secure(
     // `webpki-roots` there is nothing to fall back to, so a caller that did
     // not supply a configuration is asking for a connection that cannot
     // validate anything, and is told so rather than silently trusting.
-    #[cfg(feature = "webpki-roots")]
+    #[cfg(any(feature = "webpki-roots", feature = "webpki-roots-eko"))]
     let config = options
         .tls
         .clone()
         .unwrap_or_else(crate::tls::default_client_config);
-    #[cfg(not(feature = "webpki-roots"))]
+    #[cfg(not(any(feature = "webpki-roots", feature = "webpki-roots-eko")))]
     let config = options.tls.clone().ok_or(Error::Url(
         "wss:// needs a TLS configuration: this build has no bundled roots",
     ))?;
@@ -234,8 +248,8 @@ pub async fn connect_secure(
     // host from the URL rather than the address that was connected to.
     let name = ServerName::try_from(url.host.clone())
         .map_err(|_| Error::Url("host is not a valid server name"))?;
-    let session = crate::tls::rustls::ClientConnection::new(config, name)
-        .map_err(|_| Error::Io(Errno(libc::EPROTO)))?;
+    let session = crate::tls::ClientConnection::new(config, name)
+        .map_err(|_| Error::Io(Errno(ERR_EPROTO)))?;
 
     let mut tls = crate::tls::TlsStream::client(stream, session);
     // Explicit, so a certificate failure surfaces here rather than in the
@@ -350,6 +364,8 @@ mod tests {
         use bytes::Bytes;
         use nagoya::net::TcpListener;
         use nagoya::reactor::Reactor;
+
+        let _ = ps_rustcrypto::provider().install_default();
 
         let issued =
             rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");

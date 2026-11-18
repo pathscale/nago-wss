@@ -55,21 +55,21 @@ pub mod proto;
 pub use proto::{CloseCode, FrameError, Header, OpCode};
 
 /// The transport a connection runs over, and the fast paths a socket has.
-#[cfg(feature = "reactor")]
+#[cfg(any(feature = "reactor", feature = "eko"))]
 pub mod stream;
 
 /// A live WebSocket connection, where the protocol meets a socket.
-#[cfg(feature = "reactor")]
+#[cfg(any(feature = "reactor", feature = "eko"))]
 pub mod conn;
 
 /// Performing the opening handshake over a socket.
-#[cfg(feature = "reactor")]
+#[cfg(any(feature = "reactor", feature = "eko"))]
 pub mod upgrade;
 
 /// TLS, for `wss://`.
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "tls-eko"))]
 pub mod tls;
 
 /// Opening a connection from a URL.
-#[cfg(feature = "reactor")]
+#[cfg(any(feature = "reactor", feature = "eko"))]
 pub mod client;

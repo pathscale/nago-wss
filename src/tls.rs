@@ -18,12 +18,12 @@
 //! `nago_wss::tls::TlsStream` and does not have to name a matching rustls
 //! version of its own.
 
-pub use nago_rustls::TlsSession;
+pub use nago_rustls::{ClientConnection, ServerConnection, TlsSession};
 
 /// The previous name for [`TlsSession`], kept so existing callers compile.
 pub type TlsStream<S> = TlsSession<S>;
 
-#[cfg(feature = "webpki-roots")]
+#[cfg(any(feature = "webpki-roots", feature = "webpki-roots-eko"))]
 pub use nago_rustls::default_client_config;
 
 // The rustls types a caller needs to build a configuration. Re-exported so it

@@ -39,6 +39,7 @@
 //! never masks, touches the payload zero times between the caller handing it
 //! over and the kernel taking it.
 
+use alloc::vec::Vec;
 use bytes::{Bytes, BytesMut};
 
 use crate::proto::frame::{FrameError, Header};
@@ -518,10 +519,15 @@ impl<S: ByteStream + StreamExt> Connection<S> {
 
 /// A seed for the masking sequence.
 fn stream_seed() -> [u8; 16] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |value| value.as_nanos() as u64);
+    #[cfg(feature = "std")]
+    let nanos = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |value| value.as_nanos() as u64)
+    };
+    #[cfg(not(feature = "std"))]
+    let nanos = eko::clock::now_ns();
     // The address of a stack local varies with ASLR between processes, which
     // the clock alone does not give on a machine where two processes start in
     // the same nanosecond.
