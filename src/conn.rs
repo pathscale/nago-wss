@@ -569,6 +569,7 @@ fn encode_close_body(frame: Option<CloseFrame>) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use nagoya::net::TcpListener;
     use nagoya::reactor::Reactor;
 

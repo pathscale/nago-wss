@@ -1,6 +1,6 @@
 [package]
 name = "nago-wss"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -11,17 +11,13 @@ categories = ["network-programming", "web-programming::websocket", "no-std"]
 
 [features]
 # The protocol core alone. No I/O, no allocator beyond `alloc`, no platform.
-default = ["std", "reactor", "tls", "webpki-roots", "simd-utf8"]
+default = ["reactor", "tls", "webpki-roots", "simd-utf8"]
 std = ["simdutf8?/std"]
 # The readiness reactor: kqueue/epoll, sockets, and the futures over them.
-# Needs `std` for `io::Error` and owned descriptors.
-reactor = ["std", "dep:nagoya", "nagoya/reactor", "dep:libc"]
-# The readiness reactor under `#![no_std]` via `ekostd`.
-eko = ["dep:nagoya", "nagoya/eko", "dep:ekostd", "ekostd/libc-rs"]
+reactor = ["dep:nagoya", "nagoya/reactor", "dep:ekostd"]
 # wss:// rather than ws://. Pulls in rustls, which is sans-io, so this is glue
 # rather than a second I/O stack.
-tls = ["reactor", "dep:nago-rustls", "nago-rustls/std"]
-tls-eko = ["eko", "dep:nago-rustls", "nago-rustls/eko"]
+tls = ["reactor", "dep:nago-rustls"]
 # Validate text frames with vector instructions rather than the standard
 # library's byte loop. On by default, because it is not a small difference:
 # measured on this machine against `core::str::from_utf8` over the same 16 KiB
@@ -37,7 +33,6 @@ simd-utf8 = ["dep:simdutf8"]
 # The bundled trust anchors, forwarded from nago-rustls. Off, a caller
 # supplies its own configuration.
 webpki-roots = ["tls", "nago-rustls/webpki-roots"]
-webpki-roots-eko = ["tls-eko", "nago-rustls/webpki-roots"]
 
 [dependencies]
 # SIMD UTF-8 validation. A feature because the protocol core forbids `unsafe`
@@ -72,29 +67,25 @@ bytes = { version = "1.7", default-features = false }
 # go back before any merge, because publishing rejects a path dependency and
 # this repository publishes on a Cargo.toml push to the default branch. nagoya
 # 0.1.11 is published now, so they do.
-nago-rustls = { version = "^0.2.1", default-features = false, optional = true }
+nago-rustls = { version = "^0.2.2", default-features = false, optional = true }
 
 # The runtime underneath: the scheduler, sync, time, and since 0.1.4 the
 # readiness reactor and its sockets. That reactor was written here and moved
 # there, because generational tokens and edge triggered registration are the
 # same problem for anything that wants a socket, and none of it was about
 # WebSockets.
-nagoya = { version = "^0.1.21", default-features = false, optional = true }
-ekostd = { version = "^0.2.9", optional = true }
-# Errno constants the client still names (`EPROTO`, `EAI_NONAME`). Name
-# resolution itself is `nagoya::resolve::resolve`; this crate no longer binds
-# `getaddrinfo`.
-libc = { version = "^0.2.189", default-features = false, optional = true }
+nagoya = { version = "^0.1.22", default-features = false, optional = true }
+ekostd = { version = "^0.2.10", default-features = false, optional = true }
 
 [dev-dependencies]
 # The reactor the benchmarks and the Autobahn server run on. A dev dependency
 # rather than a plain one because this crate is generic over its transport: a
 # consumer supplies the socket, so only the things here that need a running
 # one name it.
-nagoya = { version = "^0.1.21", features = ["reactor"] }
+nagoya = { version = "^0.1.22", features = ["reactor"] }
 # Test certificates, generated in process. Same version endpoint-libs uses.
 rcgen = "0.14"
-ps-rustcrypto = "^0.6.1"
+ps-rustcrypto = "^0.6.2"
 # The comparison arm, and the only reason these are here. Same version
 # endpoint-libs pins, so the number reflects what the fleet actually runs.
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake"] }
@@ -105,6 +96,7 @@ futures-util = "0.3"
 # against precisely because it sits at the other end of that trade from this
 # crate, which forbids unsafe in the protocol core.
 sockudo-ws = "2.0.1"
+libc = { version = "^0.2.189", default-features = false }
 
 # Every one of these drives a real socket, so they need the reactor and say
 # so. It is a default feature, so they build without the line; the line is

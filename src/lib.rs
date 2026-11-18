@@ -42,11 +42,14 @@
 //! hard error rather than a negotiation. What the fleet does not use is not
 //! here.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![deny(missing_docs)]
 // The resolver used to be the one module allowed to opt out. It moved to
 // nagoya, and `proto` forbids unsafe on its own as well.
 #![deny(unsafe_code)]
+
+#[cfg(test)]
+extern crate std;
 
 extern crate alloc;
 
@@ -55,21 +58,21 @@ pub mod proto;
 pub use proto::{CloseCode, FrameError, Header, OpCode};
 
 /// The transport a connection runs over, and the fast paths a socket has.
-#[cfg(any(feature = "reactor", feature = "eko"))]
+#[cfg(feature = "reactor")]
 pub mod stream;
 
 /// A live WebSocket connection, where the protocol meets a socket.
-#[cfg(any(feature = "reactor", feature = "eko"))]
+#[cfg(feature = "reactor")]
 pub mod conn;
 
 /// Performing the opening handshake over a socket.
-#[cfg(any(feature = "reactor", feature = "eko"))]
+#[cfg(feature = "reactor")]
 pub mod upgrade;
 
 /// TLS, for `wss://`.
-#[cfg(any(feature = "tls", feature = "tls-eko"))]
+#[cfg(feature = "tls")]
 pub mod tls;
 
 /// Opening a connection from a URL.
-#[cfg(any(feature = "reactor", feature = "eko"))]
+#[cfg(feature = "reactor")]
 pub mod client;

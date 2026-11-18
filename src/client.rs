@@ -138,7 +138,7 @@ pub struct ClientOptions<'a> {
     /// The TLS configuration, when the URL is `wss://`.
     ///
     /// `None` uses the webpki roots.
-    #[cfg(any(feature = "tls", feature = "tls-eko"))]
+    #[cfg(feature = "tls")]
     pub tls: Option<alloc::sync::Arc<crate::tls::rustls::ClientConfig>>,
 }
 
@@ -152,24 +152,18 @@ impl Default for ClientOptions<'_> {
             // avoid. Named so it is obvious in a stack trace.
             entropy: *b"nago-wss-default",
             limits: Limits::default(),
-            #[cfg(any(feature = "tls", feature = "tls-eko"))]
+            #[cfg(feature = "tls")]
             tls: None,
         }
     }
 }
 
-#[cfg(feature = "reactor")]
-const ERR_EAI_NONAME: i32 = libc::EAI_NONAME;
-#[cfg(all(feature = "eko", not(feature = "reactor")))]
+#[cfg(target_vendor = "apple")]
+const ERR_EAI_NONAME: i32 = 8;
+#[cfg(not(target_vendor = "apple"))]
 const ERR_EAI_NONAME: i32 = -2;
 
-#[cfg(all(any(feature = "tls", feature = "tls-eko"), feature = "reactor"))]
-const ERR_EPROTO: i32 = libc::EPROTO;
-#[cfg(all(
-    any(feature = "tls", feature = "tls-eko"),
-    feature = "eko",
-    not(feature = "reactor")
-))]
+#[cfg(feature = "tls")]
 const ERR_EPROTO: i32 = eko::libc_lite::EPROTO;
 
 fn resolve_host(host: &str, port: u16) -> Result<Vec<Addr>, Error> {
@@ -218,7 +212,7 @@ pub async fn connect_plain(
 }
 
 /// Connect to a `wss://` URL.
-#[cfg(any(feature = "tls", feature = "tls-eko"))]
+#[cfg(feature = "tls")]
 pub async fn connect_secure(
     url: &Url,
     handle: &Handle,
@@ -235,12 +229,12 @@ pub async fn connect_secure(
     // `webpki-roots` there is nothing to fall back to, so a caller that did
     // not supply a configuration is asking for a connection that cannot
     // validate anything, and is told so rather than silently trusting.
-    #[cfg(any(feature = "webpki-roots", feature = "webpki-roots-eko"))]
+    #[cfg(feature = "webpki-roots")]
     let config = options
         .tls
         .clone()
         .unwrap_or_else(crate::tls::default_client_config);
-    #[cfg(not(any(feature = "webpki-roots", feature = "webpki-roots-eko")))]
+    #[cfg(not(feature = "webpki-roots"))]
     let config = options.tls.clone().ok_or(Error::Url(
         "wss:// needs a TLS configuration: this build has no bundled roots",
     ))?;
@@ -372,18 +366,29 @@ mod tests {
         let certificate = CertificateDer::from(issued.cert.der().to_vec());
         let key = PrivateKeyDer::try_from(issued.signing_key.serialize_der()).expect("key");
 
+        let provider = Arc::new(ps_rustcrypto::provider());
         let server_config = Arc::new(
-            rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(alloc::vec![certificate.clone()], key)
-                .expect("server config"),
+            rustls::ServerConfig::builder_with_details(
+                Arc::clone(&provider),
+                Arc::new(nago_rustls::EkoTimeProvider),
+            )
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(alloc::vec![certificate.clone()], key)
+            .expect("server config"),
         );
         let mut roots = rustls::RootCertStore::empty();
         roots.add(certificate).expect("trust");
         let client_config = Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
+            rustls::ClientConfig::builder_with_details(
+                provider,
+                Arc::new(nago_rustls::EkoTimeProvider),
+            )
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
         );
 
         let reactor = Reactor::start().expect("reactor");
@@ -394,7 +399,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             nagoya::block_on(async move {
                 let (stream, _) = listener.accept().await.expect("accept");
-                let session = rustls::ServerConnection::new(server_config).expect("session");
+                let session = nago_rustls::ServerConnection::new(server_config).expect("session");
                 let mut tls = crate::tls::TlsStream::server(stream, session);
                 tls.handshake().await.expect("tls handshake");
 
