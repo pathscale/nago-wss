@@ -130,9 +130,8 @@ impl core::fmt::Display for Error {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for Error {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
             _ => None,
@@ -519,14 +518,6 @@ impl<S: ByteStream + StreamExt> Connection<S> {
 
 /// A seed for the masking sequence.
 fn stream_seed() -> [u8; 16] {
-    #[cfg(feature = "std")]
-    let nanos = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |value| value.as_nanos() as u64)
-    };
-    #[cfg(not(feature = "std"))]
     let nanos = eko::clock::now_ns();
     // The address of a stack local varies with ASLR between processes, which
     // the clock alone does not give on a machine where two processes start in
